@@ -1,0 +1,4 @@
+python -m venv .venv
+activate
+pip install ultralytics
+pip install opencv-python
