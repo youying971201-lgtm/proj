@@ -3,8 +3,8 @@ import numpy as np
 from ultralytics import YOLO
 import Car
 
-model = YOLO("yolov8x.pt")
-cap = cv2.VideoCapture(2)
+model = YOLO("yolo11x.pt")
+cap = cv2.VideoCapture(1)
 
 #roi_points = np.array([[[730, 463], [842, 388], [947, 472], [834, 560]]], np.int32)
 carDict = {}
@@ -76,7 +76,9 @@ while cap.isOpened():
     frame_count+=1
     
     #cv2.polylines(frame, [roi_points], True, (0, 0, 255), 2)
-    results = model.track(frame, persist=True, tracker="bytetrack.yaml", classes = [2,3,5,7,9], verbose=False)
+    #=======windowns => device = 0; mac => device='mps'=======
+    results = model.track(frame, persist=True, tracker="bytetrack.yaml", classes = [2,3,5,7,9], verbose=False, device='mps')
+    
     #results = model.track(frame, persist=True, tracker="my_track.yaml", classes=[2], verbose=False)
     
     if results[0].boxes.id is not None:
