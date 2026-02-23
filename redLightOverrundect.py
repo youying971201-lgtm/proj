@@ -4,7 +4,7 @@ from ultralytics import YOLO
 import Car
 
 model = YOLO("yolo11x.pt")
-cap = cv2.VideoCapture(1)
+cap = cv2.VideoCapture(2)
 
 #roi_points = np.array([[[730, 463], [842, 388], [947, 472], [834, 560]]], np.int32)
 carDict = {}
@@ -50,18 +50,18 @@ def detect_traffic_light_color(roi):
     upper_red2 = np.array([180, 255, 255])
 
     # 綠色
-    lower_green = np.array([40, 100, 100])
-    upper_green = np.array([80, 255, 255])
+    lower_green = np.array([35, 40, 40])
+    upper_green = np.array([85, 255, 255])
 
     mask_red = cv2.inRange(hsv, lower_red1, upper_red1) + \
-               cv2.inRange(hsv, lower_red2, upper_red2)
+                cv2.inRange(hsv, lower_red2, upper_red2)
 
     mask_green = cv2.inRange(hsv, lower_green, upper_green)
 
     red_count = cv2.countNonZero(mask_red)
     green_count = cv2.countNonZero(mask_green)
 
-    threshold = 120  # 面積門檻，避免雜訊
+    threshold = 100  # 面積門檻，避免雜訊
 
     if red_count > green_count and red_count > threshold:
         return "RED",(0,0,225)#"RED"
@@ -78,8 +78,9 @@ while cap.isOpened():
     #cv2.polylines(frame, [roi_points], True, (0, 0, 255), 2)
     #=======windowns => device = 0; mac => device='mps'=======
     results = model.track(frame, persist=True, tracker="bytetrack.yaml", classes = [2,3,5,7,9], verbose=False, device='mps')
-    
     #results = model.track(frame, persist=True, tracker="my_track.yaml", classes=[2], verbose=False)
+    
+    
     
     if results[0].boxes.id is not None:
         # 取得 座標、ID 與 類別
@@ -87,6 +88,7 @@ while cap.isOpened():
         ids = results[0].boxes.id.cpu().numpy().astype(int)
         clss = results[0].boxes.cls.cpu().numpy().astype(int)
         confs = results[0].boxes.conf.cpu().numpy()
+        
         for box, track_id , cls,conf in zip(boxes, ids, clss,confs):
             
             
@@ -136,7 +138,7 @@ while cap.isOpened():
             # 繪製結果
             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
             cv2.circle(frame, (center_x, center_y), 5, (0,225,0), -1)
-            cv2.putText(frame, f"ID: {track_id}_CLS:{cls}", (x1, y1 - 10), 
+            cv2.putText(frame, f"ID: {track_id}_CLS:{cls}\n x1x2{int(x1),int(x2)}\n y1y2{int(y1),int(y2)}", (x1, y1 - 10), 
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,0), 2)
 
             
@@ -152,7 +154,9 @@ while cap.isOpened():
         for key in deleteList:
             del carDict[key]
     
-    key = cv2.waitKey(1) & 0xff
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    delay = int(1000 / fps) if fps > 0 else 33
+    key = cv2.waitKey(delay) & 0xFF
     if key == ord('q'):
         break
     elif key == ord('r'):
