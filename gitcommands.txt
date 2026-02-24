@@ -65,7 +65,6 @@ git show <Commit_ID>                            # 顯示「特定一次提交」
 git diff                                        # 查看所有「尚未加入暫存區」的程式碼差異
 git diff <檔案名稱>                              # 查看「特定檔案」尚未加入暫存區的差異
 git diff --staged                               # 查看「已加入暫存區但尚未提交」的差異
-
 [ 5. 分支單一操作指令 (Branch) ]
 git branch                                      # 列出所有本地分支，打 * 號為當前分支
 git branch <新分支名稱>                          # 在目前的進度上建立新分支
