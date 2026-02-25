@@ -6,7 +6,8 @@ import Car
 model = YOLO("yolo11x.pt")
 cap = cv2.VideoCapture(2)
 
-#roi_points = np.array([[[730, 463], [842, 388], [947, 472], [834, 560]]], np.int32)
+#roi_points = np.array([[[730, 463], [842, 388], [947, 472], [834, 560]]], np.int3
+# 2)
 carDict = {}
 
 frame_count = 0 
