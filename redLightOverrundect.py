@@ -4,16 +4,23 @@ from ultralytics import YOLO
 import Car
 
 model = YOLO("yolo11x.pt")
-cap = cv2.VideoCapture(2)
+
 
 #roi_points = np.array([[[730, 463], [842, 388], [947, 472], [834, 560]]], np.int3
 # 2)
 carDict = {}
-
 frame_count = 0 
 RorG = "GREEN"
-line_point1 = (345, 400)
-line_point2 = (1150, 400)
+
+
+cap = cv2.VideoCapture(2)
+ret, frame = cap.read()
+height, width, channels = frame.shape
+print(height, width)
+
+line_point1 = (int(0.27*width), int(0.55*height))
+line_point2 = (int(0.9*width), int(0.58*height))
+
 def is_crossing_line(p1, p2, l1, l2):
     """
     使用向量叉積判斷線段 (p1,p2) 是否與 (l1,l2) 相交
