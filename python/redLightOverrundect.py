@@ -1,7 +1,7 @@
 import cv2
 import numpy as np
 from ultralytics import YOLO
-import proj.python.Car as Car
+import Car as Car
 
 model = YOLO("yolo11x.pt")
 
