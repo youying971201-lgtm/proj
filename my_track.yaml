@@ -1,0 +1,7 @@
+tracker_type: bytetrack # 追蹤器類型
+track_high_thresh: 0.5  # 高分偵測框門檻
+track_low_thresh: 0.1   # 低分偵測框門檻
+new_track_thresh: 0.6   # 建立新軌跡的門檻
+track_buffer: 30        # 丟失後保留 ID 的影格數
+match_thresh: 0.8       # 匹配門檻
+fuse_score: True        # 關鍵：必須加上這一行，否則會報錯
