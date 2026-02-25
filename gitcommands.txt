@@ -79,4 +79,3 @@ git reset <檔案名稱>                             # 將檔案從暫存區移�
 git checkout -- <檔案名稱>                       # 【危險】捨棄工作區中特定檔案的修改，回到上次 commit
 git reset --hard <Commit_ID>                    # 【危險】強制將整個專案重置到指定版本，捨棄所有未提交修改
 
-
