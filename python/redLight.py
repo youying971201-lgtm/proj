@@ -91,8 +91,8 @@ while cap.isOpened():
                 elif carDict[track_id].illegal == True:
                     color = (0,0,225)
                 else:
-                    preCenter = carDict[track_id].printLastCenter()
-                    carDict[track_id].crossed = Car.is_crossing_line(preCenter,(center_x, center_y),line_point1, line_point2)
+                    
+                    carDict[track_id].crossed = Car.line_crossed(carDict[track_id],(center_x, center_y),line_point1, line_point2)
                     cv2.putText(frame, f"ID: {track_id}_CLS:{cls} CROSSED:{carDict[track_id].crossed}", (x1, y1 - 10), 
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,0), 2)
                 if RorG == "GREEN" and carDict[track_id].crossed == True:
@@ -122,7 +122,7 @@ while cap.isOpened():
         deleteList = []
         for key, value in carDict.items():
             #print(frame_count - value.printFrameAppear())
-            if value.printIllegal() == False and frame_count - value.printFrameAppear() > 50:
+            if value.returnIllegal() == False and frame_count - value.returnFrameAppear() > 50:
                 print(key,"deleted")
                 deleteList.append(key)
         for key in deleteList:
@@ -140,7 +140,7 @@ while cap.isOpened():
 cap.release()
 cv2.destroyAllWindows()
 for key, value in carDict.items():
-    isLegal = value.printIllegal()
+    isLegal = value.returnIllegal()
     print(f"{key} : {isLegal}")
     
 
