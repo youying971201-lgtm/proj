@@ -2,6 +2,8 @@ import cv2
 import numpy as np
 from ultralytics import YOLO
 import Car as Car
+import trafficLight
+
 model = YOLO("yolo11x.pt")
 #roi_points = np.array([[[730, 463], [842, 388], [947, 472], [834, 560]]], np.int3
 # 2)
@@ -14,13 +16,13 @@ height, width, channels = frame.shape
 print(height, width)
 line_point1 = (int(0.27*width), int(0.55*height))
 line_point2 = (int(0.9*width), int(0.58*height))
-
+"""
 def is_crossing_line(p1, p2, l1, l2):
-    """
+    
     使用向量叉積判斷線段 (p1,p2) 是否與 (l1,l2) 相交
     p1, p2: 車輛前一幀與這一幀的中心點
     l1, l2: 判定線的兩端
-    """
+    
     def cross_product(o, a, b):
         return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
     # 簡單的快速排斥實驗與跨立實驗邏輯
@@ -33,6 +35,7 @@ def is_crossing_line(p1, p2, l1, l2):
     if ((cp1 * cp2 < 0) and (cp3 * cp4 < 0)):
         return True
     return False
+"""
 
 def detect_traffic_light_color(roi):
     """
@@ -87,7 +90,7 @@ while cap.isOpened():
             #print(track_id)
             if cls == 9:
                 roi = frame[y1:y2, x1:x2]
-                RorG, color = detect_traffic_light_color(roi)
+                RorG, color = trafficLight.trafficLight.detect_traffic_light_color(roi)
                 cv2.line(frame, line_point1, line_point2, color, 3)
             elif cls in [2,3,5,7]:
                 if track_id not in carDict:
@@ -103,8 +106,8 @@ while cap.isOpened():
                 elif carDict[track_id].illegal == True:
                     color = (0,0,225)
                 else:
-                    preCenter = carDict[track_id].printLastCenter()
-                    carDict[track_id].crossed = is_crossing_line(preCenter,(center_x, center_y),line_point1, line_point2)
+                    
+                    carDict[track_id].crossed = Car.line_crossed(carDict[track_id],(center_x, center_y),line_point1, line_point2)
                     cv2.putText(frame, f"ID: {track_id}_CLS:{cls} CROSSED:{carDict[track_id].crossed}", (x1, y1 - 10), 
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,0), 2)
                 if RorG == "GREEN" and carDict[track_id].crossed == True:
@@ -120,7 +123,7 @@ while cap.isOpened():
         deleteList = []
         for key, value in carDict.items():
             #print(frame_count - value.printFrameAppear())
-            if value.printIllegal() == False and frame_count - value.printFrameAppear() > 50:
+            if value.returnIllegal() == False and frame_count - value.returnFrameAppear() > 50:
                 print(key,"deleted")
                 deleteList.append(key)
         for key in deleteList:
@@ -136,5 +139,5 @@ while cap.isOpened():
 cap.release()
 cv2.destroyAllWindows()
 for key, value in carDict.items():
-    isLegal = value.printIllegal()
+    isLegal = value.returnIllegal()
     print(f"{key} : {isLegal}")
