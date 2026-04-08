@@ -4,49 +4,55 @@ from ultralytics import YOLO
 import supervision as sv
 
 # ==================== 配置區 ====================
-VIDEO_SOURCE = "tra.mp4"  # 0 為預設攝影機, 或改為影片路徑如 "traffic.mp4"
+VIDEO_SOURCE = 2  # 0 為預設攝影機, 或改為影片路徑如 "traffic.mp4"
 MODEL_PATH = "yolo11x.pt"
-DEVICE = '0'  # Windows: '0' 或 '0', Mac: 'mps'
+DEVICE = 'mps'  # Windows: '0' 或 '0', Mac: 'mps'
 CLASSES_TO_DETECT = [2, 3, 5, 7, 9]  # 2:car, 3:motorcycle, 5:bus, 7:truck, 9:traffic light
 
-# ==================== 紅綠燈顏色檢測函數 ====================
 def detect_traffic_light_color(roi):
-    """
-    檢測紅綠燈顏色
-    輸入：紅綠燈 ROI（BGR 格式）
-    輸出：(狀態字串, BGR顏色元組)
-    """
     if roi is None or roi.size == 0:
         return "UNKNOWN", (225, 225, 225)
 
     hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+
+    # ==========================================
+    # 1. 紅色區間 (亮度 V 下限降至 120)
+    # ==========================================
+    lower_red1 = np.array([0, 40, 120])
+    upper_red1 = np.array([15, 255, 255])
     
-    # 紅色範圍（HSV 色域分兩段）
-    lower_red1 = np.array([0, 100, 100])
-    upper_red1 = np.array([10, 255, 255])
-    lower_red2 = np.array([160, 100, 100])
+    lower_red2 = np.array([150, 40, 120])
     upper_red2 = np.array([180, 255, 255])
-    
-    # 綠色範圍
-    lower_green = np.array([35, 40, 40])
-    upper_green = np.array([85, 255, 255])
-    
-    # 建立遮罩並計數
-    mask_red = cv2.inRange(hsv, lower_red1, upper_red1) + \
-               cv2.inRange(hsv, lower_red2, upper_red2)
+
+    # ==========================================
+    # 2. 綠色區間 (飽和度 S 降至 40，亮度 V 降至 120)
+    # ==========================================
+    lower_green = np.array([35, 40, 120])
+    upper_green = np.array([95, 255, 255])
+
+    mask_red = cv2.bitwise_or(cv2.inRange(hsv, lower_red1, upper_red1), 
+                              cv2.inRange(hsv, lower_red2, upper_red2))
     mask_green = cv2.inRange(hsv, lower_green, upper_green)
-    
+
     red_count = cv2.countNonZero(mask_red)
     green_count = cv2.countNonZero(mask_green)
-    threshold = 100  # 避免雜訊
-    
+
+    # ==========================================
+    # 3. 【關鍵】面積門檻大幅降低
+    # 原本是 100，現在降到 30。遠處的小燈泡也能被算進去。
+    # ==========================================
+    threshold = 30  
+
+    # 💡 終極 Debug 技巧：把這行印出來看！
+    # 如果畫面一直顯示 UNKNOWN，看終端機印出的數字就能知道是「差多少」才及格
+    # print(f"Red: {red_count}, Green: {green_count}")
+
     if red_count > green_count and red_count > threshold:
-        return "RED", (0, 0, 255)
+        return "RED", (0, 0, 225)      
     elif green_count > red_count and green_count > threshold:
-        return "GREEN", (0, 255, 0)
+        return "GREEN", (0, 225, 0)    
     else:
         return "UNKNOWN", (225, 225, 225)
-
 # ==================== 車輛類別 ====================
 class Vehicle:
     def __init__(self, track_id, center):
