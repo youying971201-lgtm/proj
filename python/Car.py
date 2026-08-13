@@ -1,44 +1,45 @@
-class Car:
-    """Represents a car."""
+from dataclasses import dataclass
+from typing import Optional, Tuple
 
-    def __init__(self, cord, illegal, frameAppear,lastCenter,crossed):
-        """Initialize car attributes."""
-        self.cord = cord
-        self.illegal = illegal
-        self.frameAppear = frameAppear
-        self.lastCenter = lastCenter
-        self.crossed = crossed
-    def returnIllegal(self):
-        #print(self.illegal)
-        return self.illegal
-    def returnFrameAppear(self):
-        #print(self.illegal)
-        return self.frameAppear
-    def returnLastCenter(self):
-        return self.lastCenter
-    def setLastCenter(self, lastCenter):
-        self.lastCenter = lastCenter
-    def returnCrossed(self):
-        return self.crossed
-    
-    
-def line_crossed(self, currentCenter, l1, l2):
-    """
-    使用向量叉積判斷線段 (p1,p2) 是否與 (l1,l2) 相交
-    p1, p2: 車輛前一幀與這一幀的中心點
-    l1, l2: 判定線的兩端
-    """
-    def cross_product(o, a, b):
-        return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
 
-    # 簡單的快速排斥實驗與跨立實驗邏輯
-    cp1 = cross_product(l1, l2, self.returnLastCenter())
-    cp2 = cross_product(l1, l2, currentCenter)
-    cp3 = cross_product(self.returnLastCenter(), currentCenter, l1)
-    cp4 = cross_product(self.returnLastCenter(), currentCenter, l2)
+Point = Tuple[int, int]
 
-    # 如果兩組點分別在對方的兩側，則代表相交
-    if ((cp1 * cp2 < 0) and (cp3 * cp4 < 0)):
-        return True
-    return False
-    
+
+@dataclass
+class Vehicle:
+    """保存單一追蹤車輛的位置、越線方向與違規狀態。"""
+
+    track_id: int
+    last_center: Point
+    first_seen_frame: int
+    last_seen_frame: int
+    crossed_in: bool = False
+    crossed_out: bool = False
+    illegal: bool = False
+    cross_direction: Optional[str] = None
+    # 車輛最後一次明確位於計數線的哪一側：-1、1；在線附近時維持原值。
+    line_side: Optional[int] = None
+
+    def update_position(self, center: Point, frame_number: int) -> None:
+        """更新車輛中心點及最後出現的原始影片影格編號。"""
+        self.last_center = center
+        self.last_seen_frame = frame_number
+
+    def mark_crossing(self, direction: str, light_state: str) -> bool:
+        """記錄越線方向；只有首次在紅燈越線時回傳 True。"""
+        if direction == "IN":
+            if self.crossed_in:
+                return False
+            self.crossed_in = True
+        elif direction == "OUT":
+            if self.crossed_out:
+                return False
+            self.crossed_out = True
+        else:
+            raise ValueError(f"Unsupported crossing direction: {direction}")
+
+        self.cross_direction = direction
+        if light_state == "RED" and not self.illegal:
+            self.illegal = True
+            return True
+        return False
