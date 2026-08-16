@@ -1,5 +1,6 @@
 # Byte-compiled / optimized / DLL files
 __pycache__/
+*.mp4
 *.py[codz]
 *$py.class
 
@@ -205,3 +206,6 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# YOLO 模型權重檔體積超過 GitHub 單檔 100 MB 限制，僅保留在本機。
+*.pt
