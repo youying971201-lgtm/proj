@@ -9,26 +9,32 @@ from Car import Vehicle
 from trafficLight import TrafficLightDetector
 
 
-# ==================== 基本設定 ====================
+# 基本設定
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-# 在這裡切換要分析的影片；下方 VIDEO_CONFIGS 會自動套用對應座標與方向。
-VIDEO_NAME = "day_green_normal.mp4"
+VIDEO_NAME = "day_intersection_multi_car.mp4"
 VIDEO_SOURCE = str(PROJECT_ROOT / VIDEO_NAME)
 MODEL_PATH = "yolo11x.pt"
-# 影片分析區間（單位：秒）。END_TIME_SECONDS 設為 None 代表處理到影片結尾。
-START_TIME_SECONDS = 0.0
-END_TIME_SECONDS = None
-# None 代表自動選擇裝置；CUDA GPU 可填 "0"，Apple Silicon 可填 "mps"。
-DEVICE = None
+START_TIME_SECONDS = 0.0 #影片開始時間
+END_TIME_SECONDS = None # 影片結束時間
+DEVICE = None #顯示裝置
 CLASSES_TO_DETECT = [2, 3, 5, 7, 9]
 VEHICLE_CLASSES = {2, 3, 5, 7}
 TRACK_TTL_FRAMES = 90
 DEBUG = True
 LINE_DEAD_ZONE_PIXELS = 12
+# 車輛中心點的移動速度以「像素／影格」表示。
+# 連續數幀低於停止門檻才算 STOPPED，高於行駛門檻才算 MOVING。
+MOTION_STOP_THRESHOLD = 0.8
+MOTION_MOVING_THRESHOLD = 1.5
+MOTION_CONFIRM_FRAMES = 5
+MOTION_SMOOTHING_ALPHA = 0.3
+CAMERA_MOTION_MIN_POINTS = 12
+CAMERA_MOTION_RANSAC_THRESHOLD = 2.0
+CAMERA_MOTION_SCALE = 0.25
+CAMERA_MOTION_MIN_INLIER_RATIO = 0.5
 
-# 三部影片各自的設定。座標格式為 ((起點 x, y), (終點 x, y))。
 # in_transition 表示「線的哪一側移動到哪一側」算 IN，其反向則算 OUT。
-# playback_speed 只控制顯示速度，不會跳過影格或降低偵測精度。
+# playback_speed=播放速度
 VIDEO_CONFIGS = {
     # day_green_normal.mp4（1920x1080）：車輛由遠方向鏡頭靠近，使用橫線。
     "day_green_normal.mp4": {
@@ -36,21 +42,18 @@ VIDEO_CONFIGS = {
         "in_transition": (-1, 1),  # 畫面上方 -> 下方為 IN
         "playback_speed": 1.0,
     },
-    # day_intersection_multi_car.mp4（1920x1080）：停止線前方，使用橫線。
     "day_intersection_multi_car.mp4": {
         "line": ((420, 875), (1840, 875)),
         "in_transition": (-1, 1),  # 畫面上方 -> 下方為 IN
         "playback_speed": 1.0,
     },
-    # night_red_stop.mp4（1280x720）：車流左右通過畫面，使用垂直線。
     "night_red_stop.mp4": {
         "line": ((640, 345), (640, 650)),
         "in_transition": (1, -1),  # 畫面左側 -> 右側為 IN
-        "playback_speed": 0.25,  # 以原始速度的 25% 顯示
+        "playback_speed": 0.25,
     },
 }
-
-
+#在篩選信心最高的
 def choose_traffic_light(boxes, classes, confidences):
     """從偵測結果中選出信心分數與面積綜合最高的交通號誌。"""
     candidates = []
@@ -62,9 +65,8 @@ def choose_traffic_light(boxes, classes, confidences):
         candidates.append((float(confidence) * area, box))
     return max(candidates, key=lambda item: item[0])[1] if candidates else None
 
-
+#裁切畫面防干擾
 def safe_roi(frame, box):
-    """將邊界框限制在畫面內，避免裁切交通號誌時索引超出範圍。"""
     height, width = frame.shape[:2]
     x1, y1, x2, y2 = box
     x1, x2 = np.clip([x1, x2], 0, width)
@@ -72,8 +74,82 @@ def safe_roi(frame, box):
     return frame[y1:y2, x1:x2], (int(x1), int(y1), int(x2), int(y2))
 
 
+def estimate_camera_motion(previous_gray, current_gray):
+    """用背景特徵點估計前後影格間的攝影機平移、旋轉與縮放。"""
+    identity = np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=np.float32)
+    if previous_gray is None:
+        return identity, 0.0, 0.0
+
+    # 光流只需估計整體背景運動，縮小影像可以大幅降低額外延遲。
+    previous_small = cv2.resize(
+        previous_gray,
+        None,
+        fx=CAMERA_MOTION_SCALE,
+        fy=CAMERA_MOTION_SCALE,
+        interpolation=cv2.INTER_AREA,
+    )
+    current_small = cv2.resize(
+        current_gray,
+        None,
+        fx=CAMERA_MOTION_SCALE,
+        fy=CAMERA_MOTION_SCALE,
+        interpolation=cv2.INTER_AREA,
+    )
+    previous_points = cv2.goodFeaturesToTrack(
+        previous_small,
+        maxCorners=200,
+        qualityLevel=0.01,
+        minDistance=6,
+    )
+    if previous_points is None or len(previous_points) < CAMERA_MOTION_MIN_POINTS:
+        return identity, 0.0, 0.0
+
+    current_points, status, _ = cv2.calcOpticalFlowPyrLK(
+        previous_small,
+        current_small,
+        previous_points,
+        None,
+    )
+    if current_points is None or status is None:
+        return identity, 0.0, 0.0
+
+    valid = status.reshape(-1).astype(bool)
+    source = previous_points[valid].reshape(-1, 2)
+    target = current_points[valid].reshape(-1, 2)
+    if len(source) < CAMERA_MOTION_MIN_POINTS:
+        return identity, 0.0, 0.0
+
+    transform, inliers = cv2.estimateAffinePartial2D(
+        source,
+        target,
+        method=cv2.RANSAC,
+        ransacReprojThreshold=CAMERA_MOTION_RANSAC_THRESHOLD,
+        maxIters=1000,
+        confidence=0.99,
+    )
+    if transform is None or not np.isfinite(transform).all():
+        return identity, 0.0, 0.0
+
+    # 縮小影像的旋轉／縮放比例相同，但平移量要換回原始解析度。
+    transform = transform.astype(np.float32)
+    transform[:, 2] /= CAMERA_MOTION_SCALE
+
+    # 異常的縮放通常代表特徵配對失敗，這時寧可不補償。
+    scale = float(np.hypot(transform[0, 0], transform[0, 1]))
+    if not 0.9 <= scale <= 1.1:
+        return identity, 0.0, 0.0
+
+    inlier_ratio = float(inliers.mean()) if inliers is not None else 0.0
+    if inlier_ratio < CAMERA_MOTION_MIN_INLIER_RATIO:
+        return identity, 0.0, inlier_ratio
+
+    height, width = current_gray.shape[:2]
+    image_center = np.array([width / 2.0, height / 2.0, 1.0])
+    moved_center = transform @ image_center
+    camera_motion = float(np.linalg.norm(moved_center - image_center[:2]))
+    return transform, camera_motion, inlier_ratio
+#確認計數線沒有超出畫面
 def get_video_config(video_name, width, height):
-    """取得影片專用設定，並確認計數線沒有超出畫面。"""
     if video_name not in VIDEO_CONFIGS:
         available = ", ".join(VIDEO_CONFIGS)
         raise ValueError(f"影片 {video_name!r} 尚未設定。可用影片：{available}")
@@ -91,9 +167,8 @@ def get_video_config(video_name, width, height):
         )
     return config
 
-
+#用向量叉積算再現的哪一側(我不會算)->0的話是防抖區
 def get_line_side(point, line_start, line_end):
-    """計算點位於有向線段哪一側；在線附近的防抖區內回傳 0。"""
     px, py = point
     x1, y1 = line_start
     x2, y2 = line_end
@@ -103,9 +178,8 @@ def get_line_side(point, line_start, line_end):
         return 0
     return 1 if signed_distance > 0 else -1
 
-
+#確認車輛中心投影落在線段範圍內，避免在延伸線上被錯誤計數。
 def point_is_within_line_span(point, line_start, line_end):
-    """確認車輛中心投影落在線段範圍內，避免在延伸線上被錯誤計數。"""
     px, py = point
     x1, y1 = line_start
     x2, y2 = line_end
@@ -113,7 +187,6 @@ def point_is_within_line_span(point, line_start, line_end):
     length_squared = max(dx * dx + dy * dy, 1)
     projection = ((px - x1) * dx + (py - y1) * dy) / length_squared
     return 0.0 <= projection <= 1.0
-
 
 def detect_crossing(vehicle, center, config):
     """依車輛中心跨越線段前後的側別判斷 IN／OUT，並以防抖區避免重複觸發。"""
@@ -202,6 +275,9 @@ def main():
     previous_light_state = "UNKNOWN"
     previous_time = perf_counter()
     smoothed_fps = 0.0
+    previous_gray = None
+    camera_motion = 0.0
+    camera_motion_inlier_ratio = 0.0
 
     print("Running... press 'q' to quit or 'r' to reset statistics.")
 
@@ -214,6 +290,14 @@ def main():
         if not ret:
             break
         frame_count += 1
+
+        current_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        (
+            camera_transform,
+            camera_motion,
+            camera_motion_inlier_ratio,
+        ) = estimate_camera_motion(previous_gray, current_gray)
+        previous_gray = current_gray
 
         track_options = {
             "persist": True,
@@ -313,13 +397,21 @@ def main():
 
                     color = (0, 0, 255) if vehicle.illegal else (0, 255, 0)
                     label = "ILLEGAL" if vehicle.illegal else "OK"
-                    vehicle.update_position(center, frame_count)
+                    vehicle.update_position(
+                        center,
+                        frame_count,
+                        MOTION_STOP_THRESHOLD,
+                        MOTION_MOVING_THRESHOLD,
+                        MOTION_CONFIRM_FRAMES,
+                        MOTION_SMOOTHING_ALPHA,
+                        camera_transform,
+                    )
                     cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
                     cv2.circle(frame, center, 5, (255, 0, 0), -1)
                     cross_info = vehicle.cross_direction or ""
                     cv2.putText(
                         frame,
-                        f"ID:{track_id} {label} {cross_info}",
+                        f"ID:{track_id} {label} {vehicle.motion_state} {cross_info}",
                         (x1, max(y1 - 10, 20)),
                         cv2.FONT_HERSHEY_SIMPLEX,
                         0.5,
@@ -368,6 +460,15 @@ def main():
                 frame,
                 f"Red ratio: {red_ratio:.3f} | Green ratio: {green_ratio:.3f}",
                 (10, 100),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (255, 255, 0),
+                2,
+            )
+            cv2.putText(
+                frame,
+                f"Camera motion: {camera_motion:.2f}px | Inliers: {camera_motion_inlier_ratio:.0%}",
+                (10, 130),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.6,
                 (255, 255, 0),
