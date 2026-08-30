@@ -10,10 +10,11 @@ from trafficLight import TrafficLightDetector
 
 
 # 基本設定
+Graphic_Device = input("顯卡：（cpu/cuda/mps）")
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-VIDEO_NAME = "day_intersection_multi_car.mp4"
-VIDEO_SOURCE = str(PROJECT_ROOT / VIDEO_NAME)
-MODEL_PATH = "yolo11x.pt"
+VIDEO_NAME = "day_green_normal.mp4"
+VIDEO_SOURCE = str(PROJECT_ROOT / "inputVideos" / VIDEO_NAME)
+MODEL_PATH = "yolo11s.pt"
 START_TIME_SECONDS = 0.0 #影片開始時間
 END_TIME_SECONDS = None # 影片結束時間
 DEVICE = None #顯示裝置
@@ -24,7 +25,7 @@ DEBUG = True
 LINE_DEAD_ZONE_PIXELS = 12
 # 車輛中心點的移動速度以「像素／影格」表示。
 # 連續數幀低於停止門檻才算 STOPPED，高於行駛門檻才算 MOVING。
-MOTION_STOP_THRESHOLD = 0.8
+MOTION_STOP_THRESHOLD = 0.5
 MOTION_MOVING_THRESHOLD = 1.5
 MOTION_CONFIRM_FRAMES = 5
 MOTION_SMOOTHING_ALPHA = 0.3
@@ -167,7 +168,7 @@ def get_video_config(video_name, width, height):
         )
     return config
 
-#用向量叉積算再現的哪一側(我不會算)->0的話是防抖區
+#用向量叉積算再現的哪一側->0的話是防抖區
 def get_line_side(point, line_start, line_end):
     px, py = point
     x1, y1 = line_start
@@ -307,7 +308,7 @@ def main():
         }
         if DEVICE is not None:
             track_options["device"] = DEVICE
-        result = model.track(frame, **track_options)[0]
+        result = model.track(frame, **track_options,device=Graphic_Device)[0]
 
         if result.boxes.id is not None:
             boxes = result.boxes.xyxy.cpu().numpy().astype(int)
@@ -479,8 +480,9 @@ def main():
         # 依原始 FPS 與影片專用倍率控制播放速度；推論時間也計入每幀時間。
         target_frame_seconds = 1.0 / (fps * playback_speed)
         elapsed_seconds = perf_counter() - frame_started_at
-        wait_ms = max(1, round((target_frame_seconds - elapsed_seconds) * 1000))
-        key = cv2.waitKey(wait_ms) & 0xFF
+        #wait_ms = max(1, round((target_frame_seconds - elapsed_seconds) * 1000))
+        #key = cv2.waitKey(wait_ms) & 0xFF
+        key = cv2.waitKey(1) & 0xFF
         if key == ord("q"):
             break
         if key == ord("r"):
