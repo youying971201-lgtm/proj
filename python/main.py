@@ -480,8 +480,9 @@ def main():
         # 依原始 FPS 與影片專用倍率控制播放速度；推論時間也計入每幀時間。
         target_frame_seconds = 1.0 / (fps * playback_speed)
         elapsed_seconds = perf_counter() - frame_started_at
+        # 484/485現在不需要這兩行緩衝
         #wait_ms = max(1, round((target_frame_seconds - elapsed_seconds) * 1000))
-        #key = cv2.waitKey(wait_ms) & 0xFF
+        #key = cv2.waitKey(wait_ms) & 0xFF 
         key = cv2.waitKey(1) & 0xFF
         if key == ord("q"):
             break
