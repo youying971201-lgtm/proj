@@ -14,7 +14,7 @@ Graphic_Device = input("顯卡：（cpu/cuda/mps）")
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 VIDEO_NAME = "day_green_normal.mp4"
 VIDEO_SOURCE = str(PROJECT_ROOT / "inputVideos" / VIDEO_NAME)
-MODEL_PATH = "my_model.pt"
+MODEL_PATH = "yolo11s.pt"
 START_TIME_SECONDS = 0.0 #影片開始時間
 END_TIME_SECONDS = None # 影片結束時間
 DEVICE = None #顯示裝置
@@ -374,7 +374,7 @@ def main():
                 for index, track_id in enumerate(vehicle_ids):
                     vehicle = vehicles[track_id]
                     x1, y1, x2, y2 = vehicle_boxes[index]
-                    center = ((x1 + x2) // 2, (y1 + y2) // 2)
+                    center = ((x1 + x2) // 2, y2)
                     direction = detect_crossing(vehicle, center, video_config)
                     if direction == "IN" and vehicle.crossed_in:
                         direction = None
@@ -408,6 +408,10 @@ def main():
                         MOTION_SMOOTHING_ALPHA,
                         camera_transform,
                     )
+                    if vehicle.motion_state == "STOPPED":
+                        color = (255,0,0)
+                    else:
+                        color = (0,255,0)
                     cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
                     cv2.circle(frame, center, 5, (255, 0, 0), -1)
                     cross_info = vehicle.cross_direction or ""
