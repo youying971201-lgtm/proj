@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="UTF-8">
+    <title>影片座標設定系統</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { 
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #212121; /* 深灰色背景 */
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+        }
+        .container {
+            width: 1200px;
+            background: #ffffff;
+            border-radius: 4px;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.5);
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+        }
+        .header-box {
+            width: 100%;
+            height: 60px;
+            background-color: #d9d9d9;
+            border: 2px solid #66b2ff;
+            border-radius: 8px;
+        }
+        .tabs {
+            display: flex;
+            gap: 10px;
+        }
+        .tab {
+            padding: 8px 16px;
+            background-color: #d9d9d9;
+            border-radius: 4px;
+            font-size: 14px;
+            font-weight: bold;
+            color: #555;
+            cursor: pointer;
+        }
+        .tab.active { background-color: #808080; color: #fff; }
+        
+        .main-content {
+            display: flex;
+            gap: 20px;
+            height: 600px;
+        }
+        .video-section {
+            flex: 1;
+            background-color: #000; /* 影像區域為黑色 */
+            border-radius: 12px;
+            position: relative;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            overflow: hidden;
+        }
+        
+        #video-wrapper {
+            position: relative;
+            display: inline-block;
+            max-width: 100%;
+            max-height: 100%;
+        }
+        #video-stream {
+            display: block;
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+        }
+        canvas { 
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            cursor: crosshair; 
+        }
+
+        .sidebar {
+            width: 120px;
+            background-color: #808080;
+            border-radius: 12px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 20px 0;
+            gap: 15px;
+        }
+        .sidebar-dot {
+            width: 40px;
+            height: 40px;
+            background-color: #a0a0a0;
+            border-radius: 50%;
+        }
+
+        .footer {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background-color: #d9d9d9;
+            padding: 10px 20px;
+            border-radius: 8px;
+        }
+        .footer-text {
+            background: #fff;
+            padding: 8px 20px;
+            border-radius: 4px;
+            color: #333;
+            font-weight: bold;
+        }
+        .start-btn {
+            background-color: #808080;
+            color: white;
+            border: none;
+            padding: 10px 30px;
+            border-radius: 4px;
+            font-size: 16px;
+            font-weight: bold;
+            cursor: pointer;
+        }
+        .start-btn:hover { background-color: #555; }
+    </style>
+</head>
+<body>
+
+    <div class="container">
+        <div class="header-box"></div>
+
+        <div class="tabs">
+            <div class="tab active">影片判斷</div>
+            <div class="tab">即時相機判斷</div>
+        </div>
+
+        <div class="main-content">
+            <div class="video-section">
+                <div id="video-wrapper">
+                    <img id="video-stream" src="http://127.0.0.1:8000/video_feed" alt="影像載入中...">
+                    <canvas id="drawLayer"></canvas>
+                </div>
+            </div>
+            
+            <div class="sidebar">
+                <div class="sidebar-dot" style="background:#fff"></div>
+                <div class="sidebar-dot"></div>
+                <div class="sidebar-dot"></div>
+                <div class="sidebar-dot"></div>
+                <div class="sidebar-dot"></div>
+                <div class="sidebar-dot"></div>
+            </div>
+        </div>
+
+        <div class="footer">
+            <div class="footer-text" id="status">等待影片載入，請在影像上點擊兩次以設定偵測線...</div>
+            <button class="start-btn">開始判斷</button>
+        </div>
+    </div>
+
+    <script>
+        const videoImg = document.getElementById('video-stream');
+        const canvas = document.getElementById('drawLayer');
+        const ctx = canvas.getContext('2d');
+        const status = document.getElementById('status');
+        let points = [];
+
+        // 定期校正畫布大小以貼合影片的實際渲染尺寸
+        function resizeCanvas() {
+            canvas.width = videoImg.clientWidth;
+            canvas.height = videoImg.clientHeight;
+        }
+        videoImg.onload = resizeCanvas;
+        window.onresize = resizeCanvas;
+
+        canvas.addEventListener('click', (e) => {
+            // 取得畫布在網頁上的邊界
+            const rect = canvas.getBoundingClientRect();
+            
+            // 取得前端顯示座標
+            const displayX = e.clientX - rect.left;
+            const displayY = e.clientY - rect.top;
+
+            // 【重點轉換】將前端顯示的座標，轉換為原始影片的真實解析度座標
+            // 因為後端 OpenCV 處理的是原始解析度，所以必須換算
+            const scaleX = videoImg.naturalWidth / rect.width;
+            const scaleY = videoImg.naturalHeight / rect.height;
+            
+            const realX = Math.round(displayX * scaleX);
+            const realY = Math.round(displayY * scaleY);
+
+            points.push({ x: realX, y: realY });
+
+            // 畫出點擊綠色圓點 (用前端座標畫，因為在網頁上)
+            ctx.fillStyle = "#00ff00";
+            ctx.beginPath();
+            ctx.arc(displayX, displayY, 5, 0, Math.PI * 2);
+            ctx.fill();
+
+            if (points.length === 1) {
+                status.innerText = `📍 已設定起點：(${realX}, ${realY})，請點擊設定終點...`;
+            } 
+            else if (points.length === 2) {
+                // 畫連線
+                ctx.strokeStyle = "#00ff00";
+                ctx.lineWidth = 3;
+                
+                // 為了視覺回饋，將上一個點轉回顯示座標來畫線
+                const prevDisplayX = points[0].x / scaleX;
+                const prevDisplayY = points[0].y / scaleY;
+
+                ctx.moveTo(prevDisplayX, prevDisplayY);
+                ctx.lineTo(displayX, displayY);
+                ctx.stroke();
+
+                status.innerText = "⏳ 傳送設定到 Python 後端中...";
+                sendData(points);
+            }
+        });
+
+        async function sendData(pointsData) {
+            try {
+                const response = await fetch('http://127.0.0.1:8000/save_points', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        timestamp: new Date().toISOString(),
+                        action: "set_detection_line",
+                        points: pointsData
+                    })
+                });
+                
+                const result = await response.json();
+                status.innerText = "✅ 判斷線已更新！(顯示於影像串流中)";
+                
+                // 短暫延遲後清除前端畫布 (因為後端傳來的影像已經包含線條了)
+                setTimeout(() => {
+                    ctx.clearRect(0, 0, canvas.width, canvas.height);
+                    points = [];
+                }, 1000);
+
+            } catch (error) {
+                status.style.color = "red";
+                status.innerText = "❌ 錯誤：無法連線到伺服器";
+                console.error(error);
+                points = []; // 發生錯誤清空，讓使用者重試
+            }
+        }
+    </script>
+</body>
+</html>
