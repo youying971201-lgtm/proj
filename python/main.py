@@ -327,6 +327,8 @@ def resolve_device(requested_device):
     if requested_device == "auto":
         if torch.backends.mps.is_available():
             return "mps"
+        elif torch.cuda.is_available():
+            return "cuda"
         print("MPS 目前不可用，改用 CPU。可用 `python -c` 檢查 torch.backends.mps.is_available()。")
         return "cpu"
     if requested_device == "mps" and not torch.backends.mps.is_available():
@@ -537,8 +539,6 @@ def run_monitor(graphic_device, model_path):
                     vehicle = vehicles[track_id]
                     x1, y1, x2, y2 = vehicle_boxes[index]
                     center = ((x1 + x2) // 2, y2)
-                    direction = detect_crossing(vehicle, center, video_config)
-                    center = ((x1 + x2) // 2, (y1 + y2) // 2)
                     with line_lock:
                         active_config = dict(video_config)
                     direction = detect_crossing(vehicle, center, active_config)
