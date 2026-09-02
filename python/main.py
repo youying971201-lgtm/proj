@@ -1,8 +1,15 @@
+import argparse
+import json
 from pathlib import Path
+from threading import Condition, Lock, Thread
 from time import perf_counter
 
 import cv2
 import numpy as np
+import torch
+import uvicorn
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from ultralytics import YOLO
 
 from Car import Vehicle
@@ -10,17 +17,19 @@ from trafficLight import TrafficLightDetector
 
 
 # 基本設定
-Graphic_Device = input("顯卡：（cpu/cuda/mps）")
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 VIDEO_NAME = "day_green_normal.mp4"
 VIDEO_SOURCE = str(PROJECT_ROOT / "inputVideos" / VIDEO_NAME)
+# 預設使用 COCO 預訓練的 YOLO11s。第一次啟動會由 Ultralytics 自動下載。
 MODEL_PATH = "yolo11s.pt"
 START_TIME_SECONDS = 0.0 #影片開始時間
 END_TIME_SECONDS = None # 影片結束時間
 DEVICE = None #顯示裝置
-#CLASSES_TO_DETECT = [2, 3, 5, 7, 9]
-CLASSES_TO_DETECT = [1,2,3,4,5,6]
+# YOLO11 COCO 類別：car=2、motorcycle=3、bus=5、truck=7、traffic light=9。
+CLASSES_TO_DETECT = [2, 3, 5, 7, 9]
 VEHICLE_CLASSES = {2, 3, 5, 7}
+MPS_IMAGE_SIZE = 960  # M2 Air GPU 上兼顧偵測品質與長時間運行溫度／速度。
+CPU_IMAGE_SIZE = 640  # MPS 暫時不可用時，避免 YOLO11s 在 CPU 上過度延遲。
 TRACK_TTL_FRAMES = 90
 DEBUG = True
 LINE_DEAD_ZONE_PIXELS = 12
@@ -34,6 +43,61 @@ CAMERA_MOTION_MIN_POINTS = 12
 CAMERA_MOTION_RANSAC_THRESHOLD = 2.0
 CAMERA_MOTION_SCALE = 0.25
 CAMERA_MOTION_MIN_INLIER_RATIO = 0.5
+
+# 網頁端設定的判斷線會保存於此檔案；程式下次啟動時也會自動讀回。
+POINTS_FILE = PROJECT_ROOT / "cord_data" / "points_data.json"
+
+
+class FrameBroadcaster:
+    """保存最新一張處理完成的 JPEG，供多個 MJPEG 瀏覽器連線讀取。"""
+
+    def __init__(self):
+        self._condition = Condition()
+        self._frame = None
+        self._sequence = 0
+        self._finished = False
+
+    def publish(self, frame):
+        ok, encoded = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        if not ok:
+            return
+        with self._condition:
+            self._frame = encoded.tobytes()
+            self._sequence += 1
+            self._condition.notify_all()
+
+    def frames(self):
+        sequence = -1
+        while True:
+            with self._condition:
+                self._condition.wait_for(
+                    lambda: self._sequence != sequence or self._finished,
+                    timeout=1.0,
+                )
+                if self._sequence == sequence and self._finished:
+                    return
+                if self._sequence == sequence or self._frame is None:
+                    continue
+                sequence = self._sequence
+                frame = self._frame
+            yield (
+                b"--frame\r\n"
+                b"Content-Type: image/jpeg\r\n\r\n" + frame + b"\r\n"
+            )
+
+    def finish(self):
+        with self._condition:
+            self._finished = True
+            self._condition.notify_all()
+
+    def latest_frame(self):
+        with self._condition:
+            return self._frame
+
+
+frame_broadcaster = FrameBroadcaster()
+line_lock = Lock()
+runtime_status = {"state": "waiting", "message": "等待判斷程式啟動"}
 
 # in_transition 表示「線的哪一側移動到哪一側」算 IN，其反向則算 OUT。
 # playback_speed=播放速度
@@ -210,23 +274,114 @@ def detect_crossing(vehicle, center, config):
     return "IN" if transition == config["in_transition"] else "OUT"
 
 
-def main():
+def load_saved_line(default_line):
+    """讀取網頁上一次儲存的兩點；檔案不存在或格式錯誤時使用預設值。"""
+    if not POINTS_FILE.exists():
+        return default_line
+    try:
+        with POINTS_FILE.open(encoding="utf-8") as file:
+            saved = json.load(file)
+        if "stop_line" in saved:
+            line = saved["stop_line"]["line"]
+            points = (line["L"], line["R"])
+        else:
+            points = saved["points"]
+        if len(points) != 2:
+            raise ValueError("停止線必須剛好有兩個端點")
+        return tuple((int(point["x"]), int(point["y"])) for point in points)
+    except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as error:
+        print(f"無法讀取 {POINTS_FILE}，改用預設計數線：{error}")
+        return default_line
+
+
+def prepare_configuration_frame():
+    """只讀影片第一幀，讓使用者能先在網頁完成校正。"""
+    cap = cv2.VideoCapture(VIDEO_SOURCE)
+    if not cap.isOpened():
+        set_runtime_status("error", f"無法開啟影片：{VIDEO_SOURCE}")
+        return
+    ok, frame = cap.read()
+    cap.release()
+    if not ok:
+        set_runtime_status("error", "無法讀取影片第一幀")
+        return
+    height, width = frame.shape[:2]
+    config = get_video_config(VIDEO_NAME, width, height)
+    stop_line = load_saved_line(config["line"])
+    with line_lock:
+        app.state.frame_size = (width, height)
+        app.state.video_config = {**config, "line": stop_line}
+        app.state.stop_line = [{"x": x, "y": y} for x, y in stop_line]
+        app.state.gates = []
+    frame_broadcaster.publish(frame)
+    set_runtime_status("configuring", "請標示停止線與至少三個 Gate，再按開始判斷")
+
+
+def set_runtime_status(state, message):
+    with line_lock:
+        runtime_status.update(state=state, message=message)
+
+
+def resolve_device(requested_device):
+    """在 Apple Silicon 優先採用 MPS，無法使用時安全回退到 CPU。"""
+    if requested_device == "auto":
+        if torch.backends.mps.is_available():
+            return "mps"
+        print("MPS 目前不可用，改用 CPU。可用 `python -c` 檢查 torch.backends.mps.is_available()。")
+        return "cpu"
+    if requested_device == "mps" and not torch.backends.mps.is_available():
+        print("要求使用 MPS，但目前不可用；改用 CPU。")
+        return "cpu"
+    return requested_device
+
+
+def run_monitor(graphic_device, model_path):
     """開啟影片，在指定時間區間內執行號誌辨識與車輛追蹤。"""
     if START_TIME_SECONDS < 0:
         raise ValueError("START_TIME_SECONDS 不可小於 0。")
     if END_TIME_SECONDS is not None and END_TIME_SECONDS <= START_TIME_SECONDS:
         raise ValueError("END_TIME_SECONDS 必須大於 START_TIME_SECONDS。")
 
-    model = YOLO(MODEL_PATH)
+    # yolo11s.pt 是 Ultralytics 官方資產名稱，缺少時讓套件自動下載；
+    # 其他模型路徑則必須是實際存在的檔案，避免把拼錯路徑當成模型名稱。
+    is_default_model = model_path == MODEL_PATH
+    resolved_model_path = Path(model_path).expanduser().resolve()
+    if not is_default_model and not resolved_model_path.is_file():
+        message = f"找不到 YOLO 模型檔：{model_path}。請用 --model 指定正確的 .pt 檔。"
+        print(message)
+        set_runtime_status("error", message)
+        frame_broadcaster.finish()
+        return
+
+    selected_device = resolve_device(graphic_device)
+    image_size = MPS_IMAGE_SIZE if selected_device == "mps" else CPU_IMAGE_SIZE
+    set_runtime_status(
+        "loading",
+        f"正在載入 YOLO 模型：{Path(model_path).name}（{selected_device}，{image_size}px）",
+    )
+    try:
+        model = YOLO(model_path if is_default_model else resolved_model_path)
+    except Exception as error:
+        message = f"無法載入 YOLO 模型：{error}"
+        print(message)
+        set_runtime_status("error", message)
+        frame_broadcaster.finish()
+        return
     cap = cv2.VideoCapture(VIDEO_SOURCE)
     if not cap.isOpened():
-        print(f"Cannot open video source: {VIDEO_SOURCE}")
+        message = f"無法開啟影片：{VIDEO_SOURCE}"
+        print(message)
+        set_runtime_status("error", message)
+        frame_broadcaster.finish()
         return
 
     ret, frame = cap.read()
     if not ret:
-        print(f"Cannot read the first frame: {VIDEO_SOURCE}")
+        message = f"無法讀取影片第一張影格：{VIDEO_SOURCE}"
+        print(message)
         cap.release()
+        set_runtime_status("error", message)
+        frame_broadcaster.finish()
         return
 
     height, width = frame.shape[:2]
@@ -256,7 +411,8 @@ def main():
     end_label = f"{end_frame / fps:.2f}" if end_frame > 0 else "video end"
     print(f"Processing interval: {start_frame / fps:.2f}s - {end_label}s")
 
-    video_config = get_video_config(VIDEO_NAME, width, height)
+    with line_lock:
+        video_config = app.state.video_config
     line_start, line_end = video_config["line"]
     playback_speed = video_config["playback_speed"]
     print(f"Counting line for {VIDEO_NAME}: start={line_start}, end={line_end}")
@@ -281,7 +437,8 @@ def main():
     camera_motion = 0.0
     camera_motion_inlier_ratio = 0.0
 
-    print("Running... press 'q' to quit or 'r' to reset statistics.")
+    set_runtime_status("running", "判斷執行中")
+    print("Running web monitor. Open http://127.0.0.1:8000")
 
     while cap.isOpened():
         frame_started_at = perf_counter()
@@ -309,7 +466,12 @@ def main():
         }
         if DEVICE is not None:
             track_options["device"] = DEVICE
-        result = model.track(frame, **track_options,device=Graphic_Device)[0]
+        result = model.track(
+            frame,
+            **track_options,
+            device=selected_device,
+            imgsz=image_size,
+        )[0]
 
         if result.boxes.id is not None:
             boxes = result.boxes.xyxy.cpu().numpy().astype(int)
@@ -376,6 +538,10 @@ def main():
                     x1, y1, x2, y2 = vehicle_boxes[index]
                     center = ((x1 + x2) // 2, y2)
                     direction = detect_crossing(vehicle, center, video_config)
+                    center = ((x1 + x2) // 2, (y1 + y2) // 2)
+                    with line_lock:
+                        active_config = dict(video_config)
+                    direction = detect_crossing(vehicle, center, active_config)
                     if direction == "IN" and vehicle.crossed_in:
                         direction = None
                     elif direction == "OUT" and vehicle.crossed_out:
@@ -439,7 +605,9 @@ def main():
         smoothed_fps = instant_fps if smoothed_fps == 0 else 0.9 * smoothed_fps + 0.1 * instant_fps
         previous_time = now
 
-        # 直接畫出本影片的專用計數線；端點順序也決定 IN／OUT 的側別。
+        # 直接畫出目前網頁設定的計數線；端點順序也決定 IN／OUT 的側別。
+        with line_lock:
+            line_start, line_end = video_config["line"]
         cv2.line(frame, line_start, line_end, (0, 0, 255), 4)
         cv2.circle(frame, line_start, 7, (0, 255, 255), -1)
         cv2.circle(frame, line_end, 7, (0, 255, 255), -1)
@@ -481,29 +649,11 @@ def main():
                 2,
             )
 
-        cv2.imshow("Traffic Monitoring System", frame)
-        # 依原始 FPS 與影片專用倍率控制播放速度；推論時間也計入每幀時間。
-        target_frame_seconds = 1.0 / (fps * playback_speed)
-        elapsed_seconds = perf_counter() - frame_started_at
-        # 484/485現在不需要這兩行緩衝
-        #wait_ms = max(1, round((target_frame_seconds - elapsed_seconds) * 1000))
-        #key = cv2.waitKey(wait_ms) & 0xFF 
-        key = cv2.waitKey(1) & 0xFF
-        if key == ord("q"):
-            break
-        if key == ord("r"):
-            vehicles.clear()
-            total_vehicle_ids.clear()
-            illegal_vehicle_ids.clear()
-            crossing_events.clear()
-            direction_counts = {"IN": 0, "OUT": 0}
-            light_detector.reset()
-            traffic_light_state = "UNKNOWN"
-            traffic_light_color = TrafficLightDetector.COLORS["UNKNOWN"]
-            print("Statistics reset.")
+        frame_broadcaster.publish(frame)
 
     cap.release()
-    cv2.destroyAllWindows()
+    frame_broadcaster.finish()
+    set_runtime_status("finished", "影片處理完成")
 
     print("\n========== Summary ==========")
     print(f"Unique tracked vehicles: {len(total_vehicle_ids)}")
@@ -512,6 +662,146 @@ def main():
     print(f"IN: {direction_counts['IN']}")
     print(f"OUT: {direction_counts['OUT']}")
     print("=============================")
+
+
+app = FastAPI(title="Traffic Monitoring System")
+
+
+@app.get("/", response_class=FileResponse)
+def index():
+    return FileResponse(PROJECT_ROOT / "frontend" / "main.html")
+
+
+@app.get("/video_feed")
+def video_feed():
+    """提供已完成辨識與繪圖的 MJPEG 影像串流。"""
+    return StreamingResponse(
+        frame_broadcaster.frames(),
+        media_type="multipart/x-mixed-replace; boundary=frame",
+    )
+
+
+@app.get("/first_frame.jpg")
+def first_frame():
+    """校正用的單張第一幀；避免瀏覽器等待 MJPEG 後續影格而顯示黑畫面。"""
+    frame = frame_broadcaster.latest_frame()
+    if frame is None:
+        raise HTTPException(status_code=503, detail="第一幀尚未準備完成")
+    return Response(content=frame, media_type="image/jpeg")
+
+
+@app.get("/api/status")
+def status():
+    with line_lock:
+        return {
+            **runtime_status,
+            "stop_line": getattr(app.state, "stop_line", None),
+            "gates": getattr(app.state, "gates", []),
+            "frame_size": getattr(app.state, "frame_size", None),
+        }
+
+
+def video_config_for_response():
+    """回傳目前線段；背景工作尚未讀到影片大小前可能沒有設定。"""
+    return getattr(app.state, "line", None)
+
+
+@app.post("/save_points")
+async def save_points(request: Request):
+    """儲存原始影片座標的停止線與多個 Gate 校正資料。"""
+    try:
+        data = await request.json()
+        stop_line = data["stop_line"]
+        gates = data["gates"]
+        if not isinstance(gates, list) or len(gates) < 3:
+            raise ValueError("至少需要三個 Gate")
+        width, height = app.state.frame_size
+        def line_of(item):
+            line = item["line"]
+            points = ((int(line["L"]["x"]), int(line["L"]["y"])), (int(line["R"]["x"]), int(line["R"]["y"])))
+            if any(x < 0 or y < 0 or x >= width or y >= height for x, y in points):
+                raise ValueError("座標超出原始影片範圍")
+            return points
+        stop_points = line_of(stop_line)
+        normalized_gates = []
+        for gate in gates:
+            line = line_of(gate)
+            normalized_gates.append({
+                "gate": str(gate["gate"]), "lane": int(gate["lane"]),
+                "station_m": float(gate["station_m"]),
+                "line": {"L": {"x": line[0][0], "y": line[0][1]}, "R": {"x": line[1][0], "y": line[1][1]}},
+            })
+        normalized_gates.sort(key=lambda gate: gate["lane"])
+        if [gate["lane"] for gate in normalized_gates] != list(range(1, len(normalized_gates) + 1)):
+            raise ValueError("lane 必須從 1 起連續遞增，代表 Gate 通過順序")
+        if any(b["station_m"] <= a["station_m"] for a, b in zip(normalized_gates, normalized_gates[1:])):
+            raise ValueError("Gate 的 station_m 必須依 lane 遞增")
+    except (ValueError, KeyError, TypeError, json.JSONDecodeError) as error:
+        raise HTTPException(status_code=422, detail=f"無效的計數線：{error}") from error
+
+    with line_lock:
+        app.state.video_config["line"] = stop_points
+        app.state.stop_line = [{"x": x, "y": y} for x, y in stop_points]
+        app.state.gates = normalized_gates
+
+    POINTS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "schema_version": 2,
+        "video": {"name": VIDEO_NAME, "width": width, "height": height},
+        "stop_line": {"line": {"L": {"x": stop_points[0][0], "y": stop_points[0][1]}, "R": {"x": stop_points[1][0], "y": stop_points[1][1]}}},
+        "gates": normalized_gates,
+    }
+    with POINTS_FILE.open("w", encoding="utf-8") as file:
+        json.dump(payload, file, ensure_ascii=False, indent=2)
+
+    print(f"Gate 校正資料已寫入：{POINTS_FILE}")
+    return {"status": "success", "message": "設定已儲存", "gates": normalized_gates}
+
+
+@app.post("/start_processing")
+def start_processing():
+    if len(getattr(app.state, "gates", [])) < 3:
+        raise HTTPException(status_code=422, detail="請先儲存至少三個 Gate")
+    if getattr(app.state, "processing_started", False):
+        raise HTTPException(status_code=409, detail="判斷已經開始")
+    app.state.processing_started = True
+    Thread(target=app.state.monitor_worker, daemon=True).start()
+    return {"status": "started"}
+
+
+def main():
+    parser = argparse.ArgumentParser(description="交通監控網頁串流服務")
+    parser.add_argument(
+        "--device",
+        default="auto",
+        choices=("auto", "cpu", "mps"),
+        help="預設 auto：Mac 優先 MPS，不可用時回退 CPU",
+    )
+    parser.add_argument(
+        "--model",
+        default=MODEL_PATH,
+        help="YOLO 權重 .pt 檔路徑（預設 yolo11s.pt，首次會自動下載）",
+    )
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", default=8000, type=int)
+    args = parser.parse_args()
+
+    def monitor_worker():
+        try:
+            run_monitor(args.device, args.model)
+        except Exception as error:
+            message = f"判斷程式意外停止：{type(error).__name__}: {error}"
+            print(message)
+            set_runtime_status("error", message)
+            frame_broadcaster.finish()
+
+    app.state.monitor_worker = monitor_worker
+    app.state.processing_started = False
+    prepare_configuration_frame()
+    try:
+        uvicorn.run(app, host=args.host, port=args.port)
+    finally:
+        frame_broadcaster.finish()
 
 
 if __name__ == "__main__":
