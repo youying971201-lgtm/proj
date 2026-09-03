@@ -412,7 +412,12 @@ def run_monitor(graphic_device, model_path):
     print(f"Processing interval: {start_frame / fps:.2f}s - {end_label}s")
 
     with line_lock:
-        video_config = app.state.video_config
+        saved_config = app.state.video_config
+        video_config = dict(saved_config)
+        video_config["line"] = tuple(
+            (round(point["x"] * (width - 1)), round(point["y"] * (height - 1)))
+            for point in app.state.stop_line
+        )
     line_start, line_end = video_config["line"]
     playback_speed = video_config["playback_speed"]
     print(f"Counting line for {VIDEO_NAME}: start={line_start}, end={line_end}")
@@ -702,7 +707,7 @@ def video_config_for_response():
 
 @app.post("/save_points")
 async def save_points(request: Request):
-    """儲存原始影片座標的停止線與多個 Gate 校正資料。"""
+    """儲存以影片寬高比例表示的停止線與多個 Gate 校正資料。"""
     try:
         data = await request.json()
         stop_line = data["stop_line"]
@@ -710,26 +715,31 @@ async def save_points(request: Request):
         if not isinstance(gates, list) or len(gates) < 3:
             raise ValueError("至少需要三個 Gate")
         width, height = app.state.frame_size
+
         def line_of(item):
             line = item["line"]
-            points = ((int(line["L"]["x"]), int(line["L"]["y"])), (int(line["R"]["x"]), int(line["R"]["y"])))
-            if any(x < 0 or y < 0 or x >= width or y >= height for x, y in points):
-                raise ValueError("座標超出原始影片範圍")
+            points = ((float(line["L"]["x"]), float(line["L"]["y"])), (float(line["R"]["x"]), float(line["R"]["y"])))
+            # 新版前端傳 0~1 比例；為相容舊網頁快取，像素座標也轉為比例。
+            if any(value > 1 for point in points for value in point):
+                points = tuple((x / max(width - 1, 1), y / max(height - 1, 1)) for x, y in points)
+            points = tuple((round(x, 5), round(y, 5)) for x, y in points)
+            if any(not 0 <= value <= 1 for point in points for value in point):
+                raise ValueError("座標比例必須介於 0 和 1")
             return points
         stop_points = line_of(stop_line)
         normalized_gates = []
         for gate in gates:
             line = line_of(gate)
             normalized_gates.append({
-                "gate": str(gate["gate"]), "lane": int(gate["lane"]),
+                "gate": str(gate["gate"]),
+                "lane": int(gate["lane"]),
                 "station_m": float(gate["station_m"]),
                 "line": {"L": {"x": line[0][0], "y": line[0][1]}, "R": {"x": line[1][0], "y": line[1][1]}},
             })
-        normalized_gates.sort(key=lambda gate: gate["lane"])
-        if [gate["lane"] for gate in normalized_gates] != list(range(1, len(normalized_gates) + 1)):
-            raise ValueError("lane 必須從 1 起連續遞增，代表 Gate 通過順序")
+        if any(gate["lane"] < 1 for gate in normalized_gates):
+            raise ValueError("lane（車道數）至少為 1")
         if any(b["station_m"] <= a["station_m"] for a, b in zip(normalized_gates, normalized_gates[1:])):
-            raise ValueError("Gate 的 station_m 必須依 lane 遞增")
+            raise ValueError("Gate 的 station_m 必須依 Gate 順序遞增")
     except (ValueError, KeyError, TypeError, json.JSONDecodeError) as error:
         raise HTTPException(status_code=422, detail=f"無效的計數線：{error}") from error
 
@@ -741,7 +751,7 @@ async def save_points(request: Request):
     POINTS_FILE.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "schema_version": 2,
-        "video": {"name": VIDEO_NAME, "width": width, "height": height},
+        "video": {"name": VIDEO_NAME, "coordinate_system": "normalized_0_to_1"},
         "stop_line": {"line": {"L": {"x": stop_points[0][0], "y": stop_points[0][1]}, "R": {"x": stop_points[1][0], "y": stop_points[1][1]}}},
         "gates": normalized_gates,
     }
