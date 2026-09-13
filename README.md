@@ -47,3 +47,42 @@ python python/main.py --device mps
 ```
 
 YOLO11s 使用 COCO 類別，已設定為偵測汽車、機車、公車、卡車與交通號誌。MPS 可用時推論影像尺寸為 960；若回退 CPU，會自動改為 640，以降低 M2 Air 長時間運行的熱降頻與延遲。
+
+## Stage-5 道路標線整合
+
+專案已內建 Stage-5 SegFormer checkpoint：
+
+```text
+models/road_marking/stage5_roadmark_best.pth
+```
+
+直接執行 `start.bat` 時，畫面會同時顯示 YOLO 車輛／號誌結果及 Stage-5
+道路標線遮罩。Windows 上如果專案本身沒有虛擬環境，啟動器會使用
+`C:\vs\lanenet_taiwan\.venv`，該環境已安裝 CUDA Torch、Ultralytics、
+Transformers、FastAPI 與 Uvicorn。
+
+目前只輸出需要的 RLMD 類別 1～10、16：槽化區、斑馬線、停止線、各種
+單／雙實線、單虛線及導流線。最新座標可由下列 API 讀取：
+
+```text
+http://127.0.0.1:8000/api/road_markings
+```
+
+每個座標同時含原圖像素 `x/y` 與 0～1 的 `nx/ny`。虛線的
+`components` 是各小段座標，`polylines` 則是把同一車道的小段串接後
+擬合出的整條線，並附有 `lane_id`。
+
+RTX 4050 預設以長邊 1280、每幀推論。若需要較高 FPS，可改成每 3 幀推論
+一次，或將長邊降成 960：
+
+```powershell
+C:\vs\lanenet_taiwan\.venv\Scripts\python.exe python\main.py --device cuda --road-marking-every 3 --road-marking-max-side 960
+```
+
+只測試一張圖片並輸出疊圖與 JSON 座標：
+
+```powershell
+C:\vs\lanenet_taiwan\.venv\Scripts\python.exe python\road_marking_demo.py "C:\path\to\image.jpg"
+```
+
+若暫時只想執行原本的 YOLO，可加上 `--no-road-markings`。

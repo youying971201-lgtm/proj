@@ -26,6 +26,9 @@ IF EXIST ".\.venv\Scripts\python.exe" (
 ) ELSE IF EXIST ".\env\Scripts\python.exe" (
     SET PYTHON_CMD=".\env\Scripts\python.exe"
     echo [INFO] 偵測到 env 虛擬環境
+) ELSE IF EXIST "C:\vs\lanenet_taiwan\.venv\Scripts\python.exe" (
+    SET PYTHON_CMD="C:\vs\lanenet_taiwan\.venv\Scripts\python.exe"
+    echo [INFO] 使用已安裝 Stage-5 與 CUDA 的 lanenet_taiwan 環境
 ) ELSE (
     echo [INFO] 未偵測到本地虛擬環境，將使用系統全域 Python
 )

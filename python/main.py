@@ -13,6 +13,7 @@ from fastapi.responses import FileResponse, Response, StreamingResponse
 from ultralytics import YOLO
 
 from Car import Vehicle
+from road_marking import RoadMarkingDetector
 from trafficLight import TrafficLightDetector
 
 
@@ -22,6 +23,9 @@ VIDEO_NAME = "day_green_normal.mp4"
 VIDEO_SOURCE = str(PROJECT_ROOT / "inputVideos" / VIDEO_NAME)
 # 預設使用 COCO 預訓練的 YOLO11s。第一次啟動會由 Ultralytics 自動下載。
 MODEL_PATH = "yolo11s.pt"
+ROAD_MARKING_MODEL_PATH = (
+    PROJECT_ROOT / "models" / "road_marking" / "stage5_roadmark_best.pth"
+)
 START_TIME_SECONDS = 0.0 #影片開始時間
 END_TIME_SECONDS = None # 影片結束時間
 DEVICE = None #顯示裝置
@@ -98,6 +102,12 @@ class FrameBroadcaster:
 frame_broadcaster = FrameBroadcaster()
 line_lock = Lock()
 runtime_status = {"state": "waiting", "message": "等待判斷程式啟動"}
+road_marking_status = {
+    "enabled": False,
+    "state": "disabled",
+    "message": "道路標線辨識尚未啟用",
+    "result": None,
+}
 
 # in_transition 表示「線的哪一側移動到哪一側」算 IN，其反向則算 OUT。
 # playback_speed=播放速度
@@ -337,7 +347,14 @@ def resolve_device(requested_device):
     return requested_device
 
 
-def run_monitor(graphic_device, model_path):
+def run_monitor(
+    graphic_device,
+    model_path,
+    road_model_path,
+    road_marking_every,
+    road_marking_max_side,
+    road_marking_opacity,
+):
     """開啟影片，在指定時間區間內執行號誌辨識與車輛追蹤。"""
     if START_TIME_SECONDS < 0:
         raise ValueError("START_TIME_SECONDS 不可小於 0。")
@@ -369,6 +386,43 @@ def run_monitor(graphic_device, model_path):
         set_runtime_status("error", message)
         frame_broadcaster.finish()
         return
+
+    road_detector = None
+    if road_model_path is not None:
+        resolved_road_model_path = Path(road_model_path).expanduser().resolve()
+        with line_lock:
+            road_marking_status.update(
+                enabled=True,
+                state="loading",
+                message=f"正在載入 Stage-5：{resolved_road_model_path.name}",
+                result=None,
+            )
+        try:
+            road_detector = RoadMarkingDetector(
+                checkpoint_path=resolved_road_model_path,
+                device=selected_device,
+                max_side=road_marking_max_side,
+            )
+        except Exception as error:
+            message = f"道路標線模型停用：{type(error).__name__}: {error}"
+            print(message)
+            with line_lock:
+                road_marking_status.update(
+                    enabled=False,
+                    state="error",
+                    message=message,
+                    result=None,
+                )
+        else:
+            message = f"Stage-5 已載入：{resolved_road_model_path.name}"
+            print(message)
+            with line_lock:
+                road_marking_status.update(
+                    enabled=True,
+                    state="ready",
+                    message=message,
+                    result=None,
+                )
     cap = cv2.VideoCapture(VIDEO_SOURCE)
     if not cap.isOpened():
         message = f"無法開啟影片：{VIDEO_SOURCE}"
@@ -443,6 +497,8 @@ def run_monitor(graphic_device, model_path):
     previous_gray = None
     camera_motion = 0.0
     camera_motion_inlier_ratio = 0.0
+    latest_road_result = None
+    latest_road_result_frame = None
 
     set_runtime_status("running", "判斷執行中")
     print("Running web monitor. Open http://127.0.0.1:8000")
@@ -473,12 +529,50 @@ def run_monitor(graphic_device, model_path):
         }
         if DEVICE is not None:
             track_options["device"] = DEVICE
+        inference_frame = frame
         result = model.track(
-            frame,
+            inference_frame,
             **track_options,
             device=selected_device,
             imgsz=image_size,
         )[0]
+
+        if road_detector is not None and (
+            latest_road_result is None
+            or (frame_count - start_frame - 1) % road_marking_every == 0
+        ):
+            try:
+                latest_road_result = road_detector.predict(inference_frame)
+                latest_road_result_frame = frame_count
+                with line_lock:
+                    road_marking_status.update(
+                        enabled=True,
+                        state="running",
+                        message=(
+                            "Stage-5 道路標線辨識中，"
+                            f"本次 {latest_road_result.inference_ms:.0f} ms"
+                        ),
+                        result=latest_road_result.as_dict(frame_count),
+                    )
+            except Exception as error:
+                message = f"道路標線推論已停用：{type(error).__name__}: {error}"
+                print(message)
+                with line_lock:
+                    road_marking_status.update(
+                        enabled=False,
+                        state="error",
+                        message=message,
+                        result=None,
+                    )
+                road_detector = None
+                latest_road_result = None
+
+        if road_detector is not None and latest_road_result is not None:
+            frame = road_detector.draw(
+                frame,
+                latest_road_result,
+                opacity=road_marking_opacity,
+            )
 
         if result.boxes.id is not None:
             boxes = result.boxes.xyxy.cpu().numpy().astype(int)
@@ -488,7 +582,7 @@ def run_monitor(graphic_device, model_path):
 
             light_box = choose_traffic_light(boxes, classes, confidences)
             if light_box is not None:
-                roi, (x1, y1, x2, y2) = safe_roi(frame, light_box)
+                roi, (x1, y1, x2, y2) = safe_roi(inference_frame, light_box)
                 (
                     traffic_light_state,
                     traffic_light_color,
@@ -653,6 +747,20 @@ def run_monitor(graphic_device, model_path):
                 (255, 255, 0),
                 2,
             )
+            if latest_road_result is not None:
+                road_age = frame_count - latest_road_result_frame
+                cv2.putText(
+                    frame,
+                    (
+                        f"Stage-5: {latest_road_result.inference_ms:.0f}ms | "
+                        f"markings: {len(latest_road_result.objects)} | age: {road_age}f"
+                    ),
+                    (10, 160),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6,
+                    (0, 255, 255),
+                    2,
+                )
 
         frame_broadcaster.publish(frame)
 
@@ -700,10 +808,22 @@ def status():
     with line_lock:
         return {
             **runtime_status,
+            "road_markings": {
+                key: value
+                for key, value in road_marking_status.items()
+                if key != "result"
+            },
             "stop_line": getattr(app.state, "stop_line", None),
             "gates": getattr(app.state, "gates", []),
             "frame_size": getattr(app.state, "frame_size", None),
         }
+
+
+@app.get("/api/road_markings")
+def road_markings():
+    """回傳 Stage-5 最新辨識結果；同時含像素與 0~1 正規化座標。"""
+    with line_lock:
+        return dict(road_marking_status)
 
 
 def video_config_for_response():
@@ -784,21 +904,60 @@ def main():
     parser.add_argument(
         "--device",
         default="auto",
-        choices=("auto", "cpu", "mps"),
-        help="預設 auto：Mac 優先 MPS，不可用時回退 CPU",
+        choices=("auto", "cpu", "cuda", "mps"),
+        help="預設 auto：依序使用 MPS、CUDA、CPU",
     )
     parser.add_argument(
         "--model",
         default=MODEL_PATH,
         help="YOLO 權重 .pt 檔路徑（預設 yolo11s.pt，首次會自動下載）",
     )
+    parser.add_argument(
+        "--road-model",
+        default=str(ROAD_MARKING_MODEL_PATH),
+        help="Stage-5 道路標線 checkpoint 路徑",
+    )
+    parser.add_argument(
+        "--no-road-markings",
+        action="store_true",
+        help="只執行原本的 YOLO，不載入 Stage-5",
+    )
+    parser.add_argument(
+        "--road-marking-every",
+        type=int,
+        default=1,
+        help="每幾幀執行一次道路標線推論；RTX 4050 建議 1~3",
+    )
+    parser.add_argument(
+        "--road-marking-max-side",
+        type=int,
+        default=1280,
+        help="Stage-5 推論影像長邊；越大越準但越慢",
+    )
+    parser.add_argument(
+        "--road-marking-opacity",
+        type=float,
+        default=0.38,
+        help="道路標線遮罩透明度（0~1）",
+    )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", default=8000, type=int)
     args = parser.parse_args()
+    if args.road_marking_every < 1:
+        parser.error("--road-marking-every 必須至少為 1")
+    if not 0.0 <= args.road_marking_opacity <= 1.0:
+        parser.error("--road-marking-opacity 必須介於 0 和 1")
 
     def monitor_worker():
         try:
-            run_monitor(args.device, args.model)
+            run_monitor(
+                args.device,
+                args.model,
+                None if args.no_road_markings else args.road_model,
+                args.road_marking_every,
+                args.road_marking_max_side,
+                args.road_marking_opacity,
+            )
         except Exception as error:
             message = f"判斷程式意外停止：{type(error).__name__}: {error}"
             print(message)
