@@ -86,3 +86,43 @@ C:\vs\lanenet_taiwan\.venv\Scripts\python.exe python\road_marking_demo.py "C:\pa
 ```
 
 若暫時只想執行原本的 YOLO，可加上 `--no-road-markings`。
+
+## 虛擬攝影機輸入（Windows）
+
+先啟動 OBS Virtual Camera 或其他虛擬攝影機，再執行：
+
+```powershell
+start-virtual-camera.bat
+```
+
+目前探測到可讀取的攝影機索引為 `1`，啟動檔會預設使用它。如果之後
+開到其他鏡頭或無法開啟，請明確指定其他索引：
+
+```powershell
+start-virtual-camera.bat 0
+start-virtual-camera.bat 2
+```
+
+專用啟動檔會向攝影機要求 1280×720、30 FPS；實際尺寸仍以虛擬攝影機
+支援的格式為準。
+
+也可以先探測可讀取的索引：
+
+```powershell
+C:\vs\lanenet_taiwan\.venv\Scripts\python.exe python\main.py --list-cameras --camera-backend auto
+```
+
+確認索引後可直接指定解析度與 FPS：
+
+```powershell
+C:\vs\lanenet_taiwan\.venv\Scripts\python.exe python\main.py --camera 1 --camera-backend auto --camera-width 1920 --camera-height 1080 --camera-fps 30 --device cuda
+```
+
+虛擬攝影機短暫中斷時，服務會保留網頁並每秒嘗試重新連線。若預設的
+`auto` 無法讀取，可將 `--camera-backend auto` 改為 `dshow` 或 `msmf`。原本影片模式
+仍可使用 `--source "C:\path\to\video.mp4"`。
+
+若 PowerShell 顯示找不到 `python`，不要使用系統 Python，請執行
+`start-virtual-camera.bat`。VS Code 已設定使用
+`C:\vs\lanenet_taiwan\.venv\Scripts\python.exe`；按 F5 後選擇
+「Main：虛擬攝影機」也會使用相同環境與攝影機設定。
