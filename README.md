@@ -89,22 +89,21 @@ C:\vs\lanenet_taiwan\.venv\Scripts\python.exe python\road_marking_demo.py "C:\pa
 
 ## 虛擬攝影機輸入（Windows）
 
-先啟動 OBS Virtual Camera 或其他虛擬攝影機，再執行：
+先啟動 OBS Virtual Camera 或其他虛擬攝影機，再直接執行 `main.py`：
 
 ```powershell
-start-virtual-camera.bat
+C:\vs\lanenet_taiwan\.venv\Scripts\python.exe python\main.py
 ```
 
-目前探測到可讀取的攝影機索引為 `1`，啟動檔會預設使用它。如果之後
-開到其他鏡頭或無法開啟，請明確指定其他索引：
+`main.py` 已直接內建虛擬攝影機索引 `1`、1280×720、30 FPS，不需要透過
+`.bat` 傳入設定。如果之後開到其他鏡頭或無法開啟，可明確指定其他索引：
 
 ```powershell
-start-virtual-camera.bat 0
-start-virtual-camera.bat 2
+C:\vs\lanenet_taiwan\.venv\Scripts\python.exe python\main.py --camera 0
+C:\vs\lanenet_taiwan\.venv\Scripts\python.exe python\main.py --camera 2
 ```
 
-專用啟動檔會向攝影機要求 1280×720、30 FPS；實際尺寸仍以虛擬攝影機
-支援的格式為準。
+實際尺寸仍以虛擬攝影機支援的格式為準。
 
 也可以先探測可讀取的索引：
 
