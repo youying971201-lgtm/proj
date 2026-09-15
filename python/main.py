@@ -28,6 +28,8 @@ from video_source import CAMERA_BACKENDS, list_available_cameras, open_video_cap
 
 # 基本設定
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+# 影像來源預設值：改成 "camera" 使用攝影機，改成 "video" 使用下方影片。
+DEFAULT_INPUT_MODE = "camera"
 DEFAULT_VIDEO_NAME = "day_green_normal.mp4"
 DEFAULT_CAMERA_INDEX = 1
 DEFAULT_CAMERA_WIDTH = 1280
@@ -1083,8 +1085,14 @@ def main():
                 print(f"  {index}: {width}x{height}, FPS={fps:.1f}")
         return
     if args.source is None and args.camera is None:
-        args.camera = DEFAULT_CAMERA_INDEX
-        print(f"未指定影像來源，預設使用虛擬相機索引 {args.camera}")
+        if DEFAULT_INPUT_MODE == "camera":
+            args.camera = DEFAULT_CAMERA_INDEX
+            print(f"未指定影像來源，預設使用虛擬相機索引 {args.camera}")
+        elif DEFAULT_INPUT_MODE == "video":
+            args.source = str(PROJECT_ROOT / "inputVideos" / DEFAULT_VIDEO_NAME)
+            print(f"未指定影像來源，預設使用影片 {args.source}")
+        else:
+            parser.error('DEFAULT_INPUT_MODE 必須是 "camera" 或 "video"')
     if args.camera is not None and args.camera < 0:
         parser.error("--camera 不可小於 0")
     for option_name in ("camera_width", "camera_height", "camera_fps"):
