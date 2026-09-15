@@ -449,6 +449,8 @@ def run_monitor(graphic_device, model_path):
     camera_motion = 0.0
     camera_motion_inlier_ratio = 0.0
 
+    
+
     set_runtime_status("running", "判斷執行中")
     print("Running web monitor. Open http://127.0.0.1:8000")
 
@@ -842,16 +844,13 @@ def main():
         frame_broadcaster.finish()
 
 
+@app.post("/shutdown")
+async def shutdown_server():
+    """接收到請求後，關閉背景的 Python 伺服器"""
+    # 發送 SIGINT 訊號給自己，等同於 Ctrl+C
+    os.kill(os.getpid(), signal.SIGINT)
+    return {"message": "Server is shutting down..."}
+
 if __name__ == "__main__":
     main()
 
-@app.post("/api/shutdown")
-def shutdown_server():
-    def kill_process():
-        time.sleep(1)  # 等待 1 秒，確保 HTTP 回應能成功傳給前端
-        print("收到前端關閉請求，準備結束伺服器...")
-        # os.kill 傳送 SIGINT，等同於 Ctrl+C
-        os.kill(os.getpid(), signal.SIGINT) 
-    
-    threading.Thread(target=kill_process, daemon=True).start()
-    return {"status": "success", "message": "Server shutting down"}
