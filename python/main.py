@@ -1,5 +1,6 @@
 import argparse
 import json
+import os
 from pathlib import Path
 from threading import Condition, Lock, Thread
 from time import perf_counter, sleep
@@ -10,6 +11,13 @@ import torch
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, Response, StreamingResponse
+
+
+# 直接執行 main.py 時也把 Ultralytics 設定保存在專案內，不依賴 .bat 設定環境變數。
+_DEFAULT_YOLO_CONFIG_DIR = Path(__file__).resolve().parent.parent / ".ultralytics"
+os.environ.setdefault("YOLO_CONFIG_DIR", str(_DEFAULT_YOLO_CONFIG_DIR))
+(_DEFAULT_YOLO_CONFIG_DIR / "Ultralytics").mkdir(parents=True, exist_ok=True)
+
 from ultralytics import YOLO
 
 from Car import Vehicle
@@ -21,7 +29,10 @@ from video_source import CAMERA_BACKENDS, list_available_cameras, open_video_cap
 # 基本設定
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_VIDEO_NAME = "day_green_normal.mp4"
-DEFAULT_VIDEO_SOURCE = str(PROJECT_ROOT / "inputVideos" / DEFAULT_VIDEO_NAME)
+DEFAULT_CAMERA_INDEX = 1
+DEFAULT_CAMERA_WIDTH = 1280
+DEFAULT_CAMERA_HEIGHT = 720
+DEFAULT_CAMERA_FPS = 30.0
 # 預設使用 COCO 預訓練的 YOLO11s。第一次啟動會由 Ultralytics 自動下載。
 MODEL_PATH = "yolo11s.pt"
 ROAD_MARKING_MODEL_PATH = (
@@ -984,8 +995,7 @@ def main():
     source_group = parser.add_mutually_exclusive_group()
     source_group.add_argument(
         "--source",
-        default=DEFAULT_VIDEO_SOURCE,
-        help="影片、串流網址或影像來源路徑",
+        help="影片、串流網址或影像來源路徑；未指定時預設使用虛擬相機",
     )
     source_group.add_argument(
         "--camera",
@@ -998,9 +1008,24 @@ def main():
         default="auto",
         help="預設 auto；若特定攝影機不相容，可改用 dshow 或 msmf",
     )
-    parser.add_argument("--camera-width", type=int, help="要求的攝影機寬度")
-    parser.add_argument("--camera-height", type=int, help="要求的攝影機高度")
-    parser.add_argument("--camera-fps", type=float, help="要求的攝影機 FPS")
+    parser.add_argument(
+        "--camera-width",
+        type=int,
+        default=DEFAULT_CAMERA_WIDTH,
+        help=f"要求的攝影機寬度（預設 {DEFAULT_CAMERA_WIDTH}）",
+    )
+    parser.add_argument(
+        "--camera-height",
+        type=int,
+        default=DEFAULT_CAMERA_HEIGHT,
+        help=f"要求的攝影機高度（預設 {DEFAULT_CAMERA_HEIGHT}）",
+    )
+    parser.add_argument(
+        "--camera-fps",
+        type=float,
+        default=DEFAULT_CAMERA_FPS,
+        help=f"要求的攝影機 FPS（預設 {DEFAULT_CAMERA_FPS:g}）",
+    )
     parser.add_argument(
         "--list-cameras",
         action="store_true",
@@ -1057,6 +1082,9 @@ def main():
             for index, width, height, fps in cameras:
                 print(f"  {index}: {width}x{height}, FPS={fps:.1f}")
         return
+    if args.source is None and args.camera is None:
+        args.camera = DEFAULT_CAMERA_INDEX
+        print(f"未指定影像來源，預設使用虛擬相機索引 {args.camera}")
     if args.camera is not None and args.camera < 0:
         parser.error("--camera 不可小於 0")
     for option_name in ("camera_width", "camera_height", "camera_fps"):
