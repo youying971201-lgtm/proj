@@ -1,0 +1,15 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Main：虛擬攝影機",
+            "type": "debugpy",
+            "request": "launch",
+            "python": "C:\\vs\\lanenet_taiwan\\.venv\\Scripts\\python.exe",
+            "program": "${workspaceFolder}/python/main.py",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "args": []
+        }
+    ]
+}
