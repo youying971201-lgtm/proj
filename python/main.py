@@ -29,14 +29,14 @@ from video_source import CAMERA_BACKENDS, list_available_cameras, open_video_cap
 # 基本設定
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 # 影像來源預設值：改成 "camera" 使用攝影機，改成 "video" 使用下方影片。
-DEFAULT_INPUT_MODE = "camera"
-DEFAULT_VIDEO_NAME = "day_green_normal.mp4"
+DEFAULT_INPUT_MODE = "video"
+DEFAULT_VIDEO_NAME = "IMG_6898.MOV"
 DEFAULT_CAMERA_INDEX = 1
 DEFAULT_CAMERA_WIDTH = 1280
 DEFAULT_CAMERA_HEIGHT = 720
 DEFAULT_CAMERA_FPS = 30.0
 # 預設使用 COCO 預訓練的 YOLO11s。第一次啟動會由 Ultralytics 自動下載。
-MODEL_PATH = "yolo11s.pt"
+MODEL_PATH = "yolo11x.pt"
 ROAD_MARKING_MODEL_PATH = (
     PROJECT_ROOT / "models" / "road_marking" / "stage5_roadmark_best.pth"
 )
