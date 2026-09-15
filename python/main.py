@@ -15,6 +15,11 @@ from ultralytics import YOLO
 from Car import Vehicle
 from trafficLight import TrafficLightDetector
 
+import os
+import signal
+import threading
+import time
+
 
 # 基本設定
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -448,6 +453,8 @@ def run_monitor(graphic_device, model_path):
     print("Running web monitor. Open http://127.0.0.1:8000")
 
     while cap.isOpened():
+        if getattr(app.state, "cancel_requested", False):
+            break
         frame_started_at = perf_counter()
         # 結束時間採不包含上限的區間，例如 5~10 秒不會處理第 10 秒的影格。
         if end_frame > 0 and int(cap.get(cv2.CAP_PROP_POS_FRAMES)) >= end_frame:
@@ -657,6 +664,10 @@ def run_monitor(graphic_device, model_path):
         frame_broadcaster.publish(frame)
 
     cap.release()
+    app.state.processing_started = False 
+
+    if getattr(app.state, "cancel_requested", False):
+        print("收到重置訊號，影片處理已中斷。")
     frame_broadcaster.finish()
     set_runtime_status("finished", "影片處理完成")
 
@@ -778,6 +789,23 @@ def start_processing():
     Thread(target=app.state.monitor_worker, daemon=True).start()
     return {"status": "started"}
 
+@app.post("/api/reset")
+def reset_processing():
+    if getattr(app.state, "processing_started", False):
+        app.state.cancel_requested = True
+        # 等待背景迴圈確實中斷並把 processing_started 改為 False
+        while getattr(app.state, "processing_started", False):
+            time.sleep(0.1)
+    
+    # 狀態重置，準備下一次啟動
+    app.state.cancel_requested = False
+    frame_broadcaster._finished = False
+    with frame_broadcaster._condition:
+        frame_broadcaster._sequence += 1
+        frame_broadcaster._condition.notify_all()
+    
+    return {"status": "success", "message": "後端已重置"}
+
 
 def main():
     parser = argparse.ArgumentParser(description="交通監控網頁串流服務")
@@ -816,3 +844,14 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+@app.post("/api/shutdown")
+def shutdown_server():
+    def kill_process():
+        time.sleep(1)  # 等待 1 秒，確保 HTTP 回應能成功傳給前端
+        print("收到前端關閉請求，準備結束伺服器...")
+        # os.kill 傳送 SIGINT，等同於 Ctrl+C
+        os.kill(os.getpid(), signal.SIGINT) 
+    
+    threading.Thread(target=kill_process, daemon=True).start()
+    return {"status": "success", "message": "Server shutting down"}
