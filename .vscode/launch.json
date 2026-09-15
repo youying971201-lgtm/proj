@@ -5,23 +5,11 @@
             "name": "Main：虛擬攝影機",
             "type": "debugpy",
             "request": "launch",
+            "python": "C:\\vs\\lanenet_taiwan\\.venv\\Scripts\\python.exe",
             "program": "${workspaceFolder}/python/main.py",
             "console": "integratedTerminal",
             "cwd": "${workspaceFolder}",
-            "args": [
-                "--camera",
-                "1",
-                "--camera-backend",
-                "auto",
-                "--camera-width",
-                "1280",
-                "--camera-height",
-                "720",
-                "--camera-fps",
-                "30",
-                "--device",
-                "cuda"
-            ]
+            "args": []
         }
     ]
 }
