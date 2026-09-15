@@ -25,6 +25,11 @@ from road_marking import RoadMarkingDetector
 from trafficLight import TrafficLightDetector
 from video_source import CAMERA_BACKENDS, list_available_cameras, open_video_capture
 
+import os
+import signal
+import threading
+import time
+
 
 # 基本設定
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -564,27 +569,14 @@ def run_monitor(
     latest_road_result = None
     latest_road_result_frame = None
 
+    
+
     set_runtime_status("running", "判斷執行中")
     print("Running web monitor. Open http://127.0.0.1:8000")
 
-    while True:
-        if not cap.isOpened():
-            if not is_live_source:
-                break
-            set_runtime_status("reconnecting", f"等待攝影機重新連線：{source_name}")
-            sleep(1.0)
-            cap = open_video_capture(
-                video_source,
-                camera_backend,
-                camera_width,
-                camera_height,
-                camera_fps,
-            )
-            if cap.isOpened():
-                previous_gray = None
-                set_runtime_status("running", "攝影機已重新連線，判斷執行中")
-            continue
-
+    while cap.isOpened():
+        if getattr(app.state, "cancel_requested", False):
+            break
         frame_started_at = perf_counter()
         # 結束時間採不包含上限的區間，例如 5~10 秒不會處理第 10 秒的影格。
         if (
@@ -854,6 +846,10 @@ def run_monitor(
         frame_broadcaster.publish(frame)
 
     cap.release()
+    app.state.processing_started = False 
+
+    if getattr(app.state, "cancel_requested", False):
+        print("收到重置訊號，影片處理已中斷。")
     frame_broadcaster.finish()
     finished_message = "攝影機串流已停止" if is_live_source else "影片處理完成"
     set_runtime_status("finished", finished_message)
@@ -990,6 +986,23 @@ def start_processing():
     app.state.processing_started = True
     Thread(target=app.state.monitor_worker, daemon=True).start()
     return {"status": "started"}
+
+@app.post("/api/reset")
+def reset_processing():
+    if getattr(app.state, "processing_started", False):
+        app.state.cancel_requested = True
+        # 等待背景迴圈確實中斷並把 processing_started 改為 False
+        while getattr(app.state, "processing_started", False):
+            time.sleep(0.1)
+    
+    # 狀態重置，準備下一次啟動
+    app.state.cancel_requested = False
+    frame_broadcaster._finished = False
+    with frame_broadcaster._condition:
+        frame_broadcaster._sequence += 1
+        frame_broadcaster._condition.notify_all()
+    
+    return {"status": "success", "message": "後端已重置"}
 
 
 def main():
@@ -1156,5 +1169,13 @@ def main():
         frame_broadcaster.finish()
 
 
+@app.post("/shutdown")
+async def shutdown_server():
+    """接收到請求後，關閉背景的 Python 伺服器"""
+    # 發送 SIGINT 訊號給自己，等同於 Ctrl+C
+    os.kill(os.getpid(), signal.SIGINT)
+    return {"message": "Server is shutting down..."}
+
 if __name__ == "__main__":
     main()
+
