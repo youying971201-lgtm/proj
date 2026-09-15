@@ -236,6 +236,7 @@
         </label>
         <button class="start" id="start" disabled>開始判斷</button>
         <button class="start" id="resetBtn" style="background: #e75050; display: none;">重新判斷</button>
+        <button class="start" onclick="closeApplication()" style="background: #454545;">關閉系統</button>
       </section>
       <section class="gate-panel">
         <h3>Gate 預覽（依設定順序）</h3>
@@ -254,6 +255,26 @@
     </aside>
   </div>
   <script>
+    function closeApplication() {
+    // 1. 跳出確認彈窗
+    const userConfirmed = confirm("確定要關閉視窗嗎？這將會同時關閉背景的 Python 伺服器。");
+
+    if (userConfirmed) {
+        // 2. 發送 POST 請求給後端的 /shutdown API
+        fetch('/shutdown', {
+            method: 'POST'
+        })
+        .then(() => {
+            // 3. 請求成功後，關閉目前的 HTML 視窗
+            // 注意：基於瀏覽器安全限制，如果視窗不是由腳本 (window.open) 開啟的，window.close() 可能會失效
+            window.close();
+        })
+        .catch(error => {
+            console.error("關閉伺服器時發生錯誤:", error);
+            alert("背景伺服器已關閉或無回應，請手動關閉此網頁。");
+        });
+    }
+  }
     window.addEventListener('beforeunload', function (e) {
     // 現代瀏覽器為了防範廣告，不允許自訂提示文字，預設就是顯示截圖中的統一文字
     e.preventDefault();
