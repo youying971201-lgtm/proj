@@ -1,8 +1,9 @@
 import argparse
 import json
+import os
 from pathlib import Path
 from threading import Condition, Lock, Thread
-from time import perf_counter
+from time import perf_counter, sleep
 
 import cv2
 import numpy as np
@@ -10,10 +11,19 @@ import torch
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, Response, StreamingResponse
+
+
+# 直接執行 main.py 時也把 Ultralytics 設定保存在專案內，不依賴 .bat 設定環境變數。
+_DEFAULT_YOLO_CONFIG_DIR = Path(__file__).resolve().parent.parent / ".ultralytics"
+os.environ.setdefault("YOLO_CONFIG_DIR", str(_DEFAULT_YOLO_CONFIG_DIR))
+(_DEFAULT_YOLO_CONFIG_DIR / "Ultralytics").mkdir(parents=True, exist_ok=True)
+
 from ultralytics import YOLO
 
 from Car import Vehicle
+from road_marking import RoadMarkingDetector
 from trafficLight import TrafficLightDetector
+from video_source import CAMERA_BACKENDS, list_available_cameras, open_video_capture
 
 import os
 import signal
@@ -23,10 +33,18 @@ import time
 
 # 基本設定
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-VIDEO_NAME = "day_green_normal.mp4"
-VIDEO_SOURCE = str(PROJECT_ROOT / "inputVideos" / VIDEO_NAME)
+# 影像來源預設值：改成 "camera" 使用攝影機，改成 "video" 使用下方影片。
+DEFAULT_INPUT_MODE = "video"
+DEFAULT_VIDEO_NAME = "IMG_6898.MOV"
+DEFAULT_CAMERA_INDEX = 1
+DEFAULT_CAMERA_WIDTH = 1280
+DEFAULT_CAMERA_HEIGHT = 720
+DEFAULT_CAMERA_FPS = 30.0
 # 預設使用 COCO 預訓練的 YOLO11s。第一次啟動會由 Ultralytics 自動下載。
-MODEL_PATH = "yolo11s.pt"
+MODEL_PATH = "yolo11x.pt"
+ROAD_MARKING_MODEL_PATH = (
+    PROJECT_ROOT / "models" / "road_marking" / "stage5_roadmark_best.pth"
+)
 START_TIME_SECONDS = 0.0 #影片開始時間
 END_TIME_SECONDS = None # 影片結束時間
 DEVICE = None #顯示裝置
@@ -103,6 +121,12 @@ class FrameBroadcaster:
 frame_broadcaster = FrameBroadcaster()
 line_lock = Lock()
 runtime_status = {"state": "waiting", "message": "等待判斷程式啟動"}
+road_marking_status = {
+    "enabled": False,
+    "state": "disabled",
+    "message": "道路標線辨識尚未啟用",
+    "result": None,
+}
 
 # in_transition 表示「線的哪一側移動到哪一側」算 IN，其反向則算 OUT。
 # playback_speed=播放速度
@@ -124,6 +148,7 @@ VIDEO_CONFIGS = {
         "playback_speed": 0.25,
     },
 }
+
 #在篩選信心最高的
 def choose_traffic_light(boxes, classes, confidences):
     """從偵測結果中選出信心分數與面積綜合最高的交通號誌。"""
@@ -222,8 +247,12 @@ def estimate_camera_motion(previous_gray, current_gray):
 #確認計數線沒有超出畫面
 def get_video_config(video_name, width, height):
     if video_name not in VIDEO_CONFIGS:
-        available = ", ".join(VIDEO_CONFIGS)
-        raise ValueError(f"影片 {video_name!r} 尚未設定。可用影片：{available}")
+        line_y = round(height * 0.7)
+        return {
+            "line": ((round(width * 0.15), line_y), (round(width * 0.85), line_y)),
+            "in_transition": (-1, 1),
+            "playback_speed": 1.0,
+        }
 
     config = VIDEO_CONFIGS[video_name]
     (start_x, start_y), (end_x, end_y) = config["line"]
@@ -299,19 +328,32 @@ def load_saved_line(default_line):
         return default_line
 
 
-def prepare_configuration_frame():
-    """只讀影片第一幀，讓使用者能先在網頁完成校正。"""
-    cap = cv2.VideoCapture(VIDEO_SOURCE)
+def prepare_configuration_frame(
+    video_source,
+    source_name,
+    camera_backend,
+    camera_width,
+    camera_height,
+    camera_fps,
+):
+    """讀取來源第一幀，讓使用者能先在網頁完成校正。"""
+    cap = open_video_capture(
+        video_source,
+        camera_backend,
+        camera_width,
+        camera_height,
+        camera_fps,
+    )
     if not cap.isOpened():
-        set_runtime_status("error", f"無法開啟影片：{VIDEO_SOURCE}")
+        set_runtime_status("error", f"無法開啟影像來源：{source_name}")
         return
     ok, frame = cap.read()
     cap.release()
     if not ok:
-        set_runtime_status("error", "無法讀取影片第一幀")
+        set_runtime_status("error", f"無法讀取影像來源第一幀：{source_name}")
         return
     height, width = frame.shape[:2]
-    config = get_video_config(VIDEO_NAME, width, height)
+    config = get_video_config(source_name, width, height)
     stop_line = load_saved_line(config["line"])
     with line_lock:
         app.state.frame_size = (width, height)
@@ -342,11 +384,29 @@ def resolve_device(requested_device):
     return requested_device
 
 
-def run_monitor(graphic_device, model_path):
-    """開啟影片，在指定時間區間內執行號誌辨識與車輛追蹤。"""
-    if START_TIME_SECONDS < 0:
+def run_monitor(
+    graphic_device,
+    model_path,
+    road_model_path,
+    road_marking_every,
+    road_marking_max_side,
+    road_marking_opacity,
+    video_source,
+    source_name,
+    is_live_source,
+    camera_backend,
+    camera_width,
+    camera_height,
+    camera_fps,
+):
+    """開啟影片或攝影機，執行號誌辨識、車輛追蹤與道路標線辨識。"""
+    if not is_live_source and START_TIME_SECONDS < 0:
         raise ValueError("START_TIME_SECONDS 不可小於 0。")
-    if END_TIME_SECONDS is not None and END_TIME_SECONDS <= START_TIME_SECONDS:
+    if (
+        not is_live_source
+        and END_TIME_SECONDS is not None
+        and END_TIME_SECONDS <= START_TIME_SECONDS
+    ):
         raise ValueError("END_TIME_SECONDS 必須大於 START_TIME_SECONDS。")
 
     # yolo11s.pt 是 Ultralytics 官方資產名稱，缺少時讓套件自動下載；
@@ -374,9 +434,52 @@ def run_monitor(graphic_device, model_path):
         set_runtime_status("error", message)
         frame_broadcaster.finish()
         return
-    cap = cv2.VideoCapture(VIDEO_SOURCE)
+
+    road_detector = None
+    if road_model_path is not None:
+        resolved_road_model_path = Path(road_model_path).expanduser().resolve()
+        with line_lock:
+            road_marking_status.update(
+                enabled=True,
+                state="loading",
+                message=f"正在載入 Stage-5：{resolved_road_model_path.name}",
+                result=None,
+            )
+        try:
+            road_detector = RoadMarkingDetector(
+                checkpoint_path=resolved_road_model_path,
+                device=selected_device,
+                max_side=road_marking_max_side,
+            )
+        except Exception as error:
+            message = f"道路標線模型停用：{type(error).__name__}: {error}"
+            print(message)
+            with line_lock:
+                road_marking_status.update(
+                    enabled=False,
+                    state="error",
+                    message=message,
+                    result=None,
+                )
+        else:
+            message = f"Stage-5 已載入：{resolved_road_model_path.name}"
+            print(message)
+            with line_lock:
+                road_marking_status.update(
+                    enabled=True,
+                    state="ready",
+                    message=message,
+                    result=None,
+                )
+    cap = open_video_capture(
+        video_source,
+        camera_backend,
+        camera_width,
+        camera_height,
+        camera_fps,
+    )
     if not cap.isOpened():
-        message = f"無法開啟影片：{VIDEO_SOURCE}"
+        message = f"無法開啟影像來源：{source_name}"
         print(message)
         set_runtime_status("error", message)
         frame_broadcaster.finish()
@@ -384,7 +487,7 @@ def run_monitor(graphic_device, model_path):
 
     ret, frame = cap.read()
     if not ret:
-        message = f"無法讀取影片第一張影格：{VIDEO_SOURCE}"
+        message = f"無法讀取影像來源第一張影格：{source_name}"
         print(message)
         cap.release()
         set_runtime_status("error", message)
@@ -393,30 +496,45 @@ def run_monitor(graphic_device, model_path):
 
     height, width = frame.shape[:2]
     fps = cap.get(cv2.CAP_PROP_FPS)
-    if fps <= 0:
-        cap.release()
-        raise RuntimeError("無法取得影片 FPS，因此無法套用開始／結束時間設定。")
+    if not np.isfinite(fps) or fps <= 0:
+        if is_live_source:
+            fps = float(camera_fps or 30.0)
+            print(f"攝影機未回報 FPS，使用 {fps:.1f} FPS 作為時間基準。")
+        else:
+            cap.release()
+            raise RuntimeError("無法取得影片 FPS，因此無法套用開始／結束時間設定。")
 
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    video_duration = total_frames / fps if total_frames > 0 else None
-    if video_duration is not None and START_TIME_SECONDS >= video_duration:
-        cap.release()
-        raise ValueError(
-            f"開始時間 {START_TIME_SECONDS:.2f} 秒已超過影片長度 "
-            f"{video_duration:.2f} 秒。"
+    if is_live_source:
+        total_frames = 0
+        video_duration = None
+        start_frame = 0
+        end_frame = 0
+    else:
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        video_duration = total_frames / fps if total_frames > 0 else None
+        if video_duration is not None and START_TIME_SECONDS >= video_duration:
+            cap.release()
+            raise ValueError(
+                f"開始時間 {START_TIME_SECONDS:.2f} 秒已超過影片長度 "
+                f"{video_duration:.2f} 秒。"
+            )
+
+        # 使用影格定位可讓結束條件明確，並避免每一幀都依賴可能不精準的時間戳。
+        start_frame = int(START_TIME_SECONDS * fps)
+        end_frame = (
+            int(END_TIME_SECONDS * fps) if END_TIME_SECONDS is not None else total_frames
         )
+        if total_frames > 0:
+            end_frame = min(end_frame, total_frames)
+        cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
 
-    # 使用影格定位可讓結束條件明確，並避免每一幀都依賴可能不精準的時間戳。
-    start_frame = int(START_TIME_SECONDS * fps)
-    end_frame = (
-        int(END_TIME_SECONDS * fps) if END_TIME_SECONDS is not None else total_frames
-    )
-    if total_frames > 0:
-        end_frame = min(end_frame, total_frames)
-    cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
-    print(f"Video resolution: {width}x{height}")
-    end_label = f"{end_frame / fps:.2f}" if end_frame > 0 else "video end"
-    print(f"Processing interval: {start_frame / fps:.2f}s - {end_label}s")
+    print(f"Input source: {source_name}")
+    print(f"Video resolution: {width}x{height} @ {fps:.1f} FPS")
+    if is_live_source:
+        print("Processing interval: live stream")
+    else:
+        end_label = f"{end_frame / fps:.2f}" if end_frame > 0 else "video end"
+        print(f"Processing interval: {start_frame / fps:.2f}s - {end_label}s")
 
     with line_lock:
         saved_config = app.state.video_config
@@ -427,7 +545,7 @@ def run_monitor(graphic_device, model_path):
         )
     line_start, line_end = video_config["line"]
     playback_speed = video_config["playback_speed"]
-    print(f"Counting line for {VIDEO_NAME}: start={line_start}, end={line_end}")
+    print(f"Counting line for {source_name}: start={line_start}, end={line_end}")
     print(f"Playback speed: {playback_speed:.0%}")
     light_detector = TrafficLightDetector()
 
@@ -448,6 +566,8 @@ def run_monitor(graphic_device, model_path):
     previous_gray = None
     camera_motion = 0.0
     camera_motion_inlier_ratio = 0.0
+    latest_road_result = None
+    latest_road_result_frame = None
 
     
 
@@ -459,10 +579,18 @@ def run_monitor(graphic_device, model_path):
             break
         frame_started_at = perf_counter()
         # 結束時間採不包含上限的區間，例如 5~10 秒不會處理第 10 秒的影格。
-        if end_frame > 0 and int(cap.get(cv2.CAP_PROP_POS_FRAMES)) >= end_frame:
+        if (
+            not is_live_source
+            and end_frame > 0
+            and int(cap.get(cv2.CAP_PROP_POS_FRAMES)) >= end_frame
+        ):
             break
         ret, frame = cap.read()
         if not ret:
+            if is_live_source:
+                print(f"攝影機畫面中斷，準備重新連線：{source_name}")
+                cap.release()
+                continue
             break
         frame_count += 1
 
@@ -482,12 +610,50 @@ def run_monitor(graphic_device, model_path):
         }
         if DEVICE is not None:
             track_options["device"] = DEVICE
+        inference_frame = frame
         result = model.track(
-            frame,
+            inference_frame,
             **track_options,
             device=selected_device,
             imgsz=image_size,
         )[0]
+
+        if road_detector is not None and (
+            latest_road_result is None
+            or (frame_count - start_frame - 1) % road_marking_every == 0
+        ):
+            try:
+                latest_road_result = road_detector.predict(inference_frame)
+                latest_road_result_frame = frame_count
+                with line_lock:
+                    road_marking_status.update(
+                        enabled=True,
+                        state="running",
+                        message=(
+                            "Stage-5 道路標線辨識中，"
+                            f"本次 {latest_road_result.inference_ms:.0f} ms"
+                        ),
+                        result=latest_road_result.as_dict(frame_count),
+                    )
+            except Exception as error:
+                message = f"道路標線推論已停用：{type(error).__name__}: {error}"
+                print(message)
+                with line_lock:
+                    road_marking_status.update(
+                        enabled=False,
+                        state="error",
+                        message=message,
+                        result=None,
+                    )
+                road_detector = None
+                latest_road_result = None
+
+        if road_detector is not None and latest_road_result is not None:
+            frame = road_detector.draw(
+                frame,
+                latest_road_result,
+                opacity=road_marking_opacity,
+            )
 
         if result.boxes.id is not None:
             boxes = result.boxes.xyxy.cpu().numpy().astype(int)
@@ -497,7 +663,7 @@ def run_monitor(graphic_device, model_path):
 
             light_box = choose_traffic_light(boxes, classes, confidences)
             if light_box is not None:
-                roi, (x1, y1, x2, y2) = safe_roi(frame, light_box)
+                roi, (x1, y1, x2, y2) = safe_roi(inference_frame, light_box)
                 (
                     traffic_light_state,
                     traffic_light_color,
@@ -662,6 +828,20 @@ def run_monitor(graphic_device, model_path):
                 (255, 255, 0),
                 2,
             )
+            if latest_road_result is not None:
+                road_age = frame_count - latest_road_result_frame
+                cv2.putText(
+                    frame,
+                    (
+                        f"Stage-5: {latest_road_result.inference_ms:.0f}ms | "
+                        f"markings: {len(latest_road_result.objects)} | age: {road_age}f"
+                    ),
+                    (10, 160),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6,
+                    (0, 255, 255),
+                    2,
+                )
 
         frame_broadcaster.publish(frame)
 
@@ -671,7 +851,8 @@ def run_monitor(graphic_device, model_path):
     if getattr(app.state, "cancel_requested", False):
         print("收到重置訊號，影片處理已中斷。")
     frame_broadcaster.finish()
-    set_runtime_status("finished", "影片處理完成")
+    finished_message = "攝影機串流已停止" if is_live_source else "影片處理完成"
+    set_runtime_status("finished", finished_message)
 
     print("\n========== Summary ==========")
     print(f"Unique tracked vehicles: {len(total_vehicle_ids)}")
@@ -713,10 +894,22 @@ def status():
     with line_lock:
         return {
             **runtime_status,
+            "road_markings": {
+                key: value
+                for key, value in road_marking_status.items()
+                if key != "result"
+            },
             "stop_line": getattr(app.state, "stop_line", None),
             "gates": getattr(app.state, "gates", []),
             "frame_size": getattr(app.state, "frame_size", None),
         }
+
+
+@app.get("/api/road_markings")
+def road_markings():
+    """回傳 Stage-5 最新辨識結果；同時含像素與 0~1 正規化座標。"""
+    with line_lock:
+        return dict(road_marking_status)
 
 
 def video_config_for_response():
@@ -770,7 +963,10 @@ async def save_points(request: Request):
     POINTS_FILE.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "schema_version": 2,
-        "video": {"name": VIDEO_NAME, "coordinate_system": "normalized_0_to_1"},
+        "video": {
+            "name": getattr(app.state, "source_name", DEFAULT_VIDEO_NAME),
+            "coordinate_system": "normalized_0_to_1",
+        },
         "stop_line": {"line": {"L": {"x": stop_points[0][0], "y": stop_points[0][1]}, "R": {"x": stop_points[1][0], "y": stop_points[1][1]}}},
         "gates": normalized_gates,
     }
@@ -811,24 +1007,146 @@ def reset_processing():
 
 def main():
     parser = argparse.ArgumentParser(description="交通監控網頁串流服務")
+    source_group = parser.add_mutually_exclusive_group()
+    source_group.add_argument(
+        "--source",
+        help="影片、串流網址或影像來源路徑；未指定時預設使用虛擬相機",
+    )
+    source_group.add_argument(
+        "--camera",
+        type=int,
+        help="實體／虛擬攝影機索引，例如 OBS Virtual Camera 常見為 0 或 1",
+    )
+    parser.add_argument(
+        "--camera-backend",
+        choices=tuple(CAMERA_BACKENDS),
+        default="auto",
+        help="預設 auto；若特定攝影機不相容，可改用 dshow 或 msmf",
+    )
+    parser.add_argument(
+        "--camera-width",
+        type=int,
+        default=DEFAULT_CAMERA_WIDTH,
+        help=f"要求的攝影機寬度（預設 {DEFAULT_CAMERA_WIDTH}）",
+    )
+    parser.add_argument(
+        "--camera-height",
+        type=int,
+        default=DEFAULT_CAMERA_HEIGHT,
+        help=f"要求的攝影機高度（預設 {DEFAULT_CAMERA_HEIGHT}）",
+    )
+    parser.add_argument(
+        "--camera-fps",
+        type=float,
+        default=DEFAULT_CAMERA_FPS,
+        help=f"要求的攝影機 FPS（預設 {DEFAULT_CAMERA_FPS:g}）",
+    )
+    parser.add_argument(
+        "--list-cameras",
+        action="store_true",
+        help="探測攝影機索引 0～9 後結束",
+    )
     parser.add_argument(
         "--device",
         default="auto",
-        choices=("auto", "cpu", "mps"),
-        help="預設 auto：Mac 優先 MPS，不可用時回退 CPU",
+        choices=("auto", "cpu", "cuda", "mps"),
+        help="預設 auto：依序使用 MPS、CUDA、CPU",
     )
     parser.add_argument(
         "--model",
         default=MODEL_PATH,
         help="YOLO 權重 .pt 檔路徑（預設 yolo11s.pt，首次會自動下載）",
     )
+    parser.add_argument(
+        "--road-model",
+        default=str(ROAD_MARKING_MODEL_PATH),
+        help="Stage-5 道路標線 checkpoint 路徑",
+    )
+    parser.add_argument(
+        "--no-road-markings",
+        action="store_true",
+        help="只執行原本的 YOLO，不載入 Stage-5",
+    )
+    parser.add_argument(
+        "--road-marking-every",
+        type=int,
+        default=1,
+        help="每幾幀執行一次道路標線推論；RTX 4050 建議 1~3",
+    )
+    parser.add_argument(
+        "--road-marking-max-side",
+        type=int,
+        default=1280,
+        help="Stage-5 推論影像長邊；越大越準但越慢",
+    )
+    parser.add_argument(
+        "--road-marking-opacity",
+        type=float,
+        default=0.38,
+        help="道路標線遮罩透明度（0~1）",
+    )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", default=8000, type=int)
     args = parser.parse_args()
+    if args.list_cameras:
+        cameras = list_available_cameras(args.camera_backend)
+        if not cameras:
+            print("找不到可讀取的攝影機。請先啟動虛擬攝影機，再改用其他 backend 重試。")
+        else:
+            print("可使用的攝影機索引：")
+            for index, width, height, fps in cameras:
+                print(f"  {index}: {width}x{height}, FPS={fps:.1f}")
+        return
+    if args.source is None and args.camera is None:
+        if DEFAULT_INPUT_MODE == "camera":
+            args.camera = DEFAULT_CAMERA_INDEX
+            print(f"未指定影像來源，預設使用虛擬相機索引 {args.camera}")
+        elif DEFAULT_INPUT_MODE == "video":
+            args.source = str(PROJECT_ROOT / "inputVideos" / DEFAULT_VIDEO_NAME)
+            print(f"未指定影像來源，預設使用影片 {args.source}")
+        else:
+            parser.error('DEFAULT_INPUT_MODE 必須是 "camera" 或 "video"')
+    if args.camera is not None and args.camera < 0:
+        parser.error("--camera 不可小於 0")
+    for option_name in ("camera_width", "camera_height", "camera_fps"):
+        option_value = getattr(args, option_name)
+        if option_value is not None and option_value <= 0:
+            parser.error(f"--{option_name.replace('_', '-')} 必須大於 0")
+    if args.road_marking_every < 1:
+        parser.error("--road-marking-every 必須至少為 1")
+    if not 0.0 <= args.road_marking_opacity <= 1.0:
+        parser.error("--road-marking-opacity 必須介於 0 和 1")
+
+    if args.camera is not None:
+        video_source = args.camera
+        source_name = f"camera:{args.camera}"
+        is_live_source = True
+    else:
+        video_source = args.source
+        source_name = Path(args.source).name or args.source
+        is_live_source = args.source.lower().startswith(
+            ("rtsp://", "rtmp://", "http://", "https://")
+        )
+
+    app.state.source_name = source_name
 
     def monitor_worker():
         try:
-            run_monitor(args.device, args.model)
+            run_monitor(
+                args.device,
+                args.model,
+                None if args.no_road_markings else args.road_model,
+                args.road_marking_every,
+                args.road_marking_max_side,
+                args.road_marking_opacity,
+                video_source,
+                source_name,
+                is_live_source,
+                args.camera_backend,
+                args.camera_width,
+                args.camera_height,
+                args.camera_fps,
+            )
         except Exception as error:
             message = f"判斷程式意外停止：{type(error).__name__}: {error}"
             print(message)
@@ -837,7 +1155,14 @@ def main():
 
     app.state.monitor_worker = monitor_worker
     app.state.processing_started = False
-    prepare_configuration_frame()
+    prepare_configuration_frame(
+        video_source,
+        source_name,
+        args.camera_backend,
+        args.camera_width,
+        args.camera_height,
+        args.camera_fps,
+    )
     try:
         uvicorn.run(app, host=args.host, port=args.port)
     finally:
