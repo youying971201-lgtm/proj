@@ -209,3 +209,6 @@ __marimo__/
 
 # YOLO 模型權重檔體積超過 GitHub 單檔 100 MB 限制，僅保留在本機。
 *.pt
+
+#json每次都會動
+.json
