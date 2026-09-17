@@ -691,38 +691,38 @@ def run_monitor(
                 cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 220, 0), 1,
             )
 
+        boxes = result.boxes.xyxy.cpu().numpy().astype(int)
+        classes = result.boxes.cls.cpu().numpy().astype(int)
+        confidences = result.boxes.conf.cpu().numpy()
+        light_box = choose_traffic_light(boxes, classes, confidences)
+        if light_box is not None:
+            roi, (x1, y1, x2, y2) = safe_roi(inference_frame, light_box)
+            (
+                traffic_light_state,
+                traffic_light_color,
+                red_ratio,
+                green_ratio,
+            ) = light_detector.update(roi)
+            cv2.rectangle(frame, (x1, y1), (x2, y2), traffic_light_color, 3)
+            cv2.putText(
+                frame,
+                traffic_light_state,
+                (x1, max(y1 - 10, 20)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                traffic_light_color,
+                2,
+            )
+
+        if traffic_light_state != previous_light_state:
+            print(
+                f"Frame {frame_count}: light "
+                f"{previous_light_state} -> {traffic_light_state}"
+            )
+            previous_light_state = traffic_light_state
+
         if result.boxes.id is not None:
-            boxes = result.boxes.xyxy.cpu().numpy().astype(int)
             ids = result.boxes.id.cpu().numpy().astype(int)
-            classes = result.boxes.cls.cpu().numpy().astype(int)
-            confidences = result.boxes.conf.cpu().numpy()
-
-            light_box = choose_traffic_light(boxes, classes, confidences)
-            if light_box is not None:
-                roi, (x1, y1, x2, y2) = safe_roi(inference_frame, light_box)
-                (
-                    traffic_light_state,
-                    traffic_light_color,
-                    red_ratio,
-                    green_ratio,
-                ) = light_detector.update(roi)
-                cv2.rectangle(frame, (x1, y1), (x2, y2), traffic_light_color, 3)
-                cv2.putText(
-                    frame,
-                    traffic_light_state,
-                    (x1, max(y1 - 10, 20)),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.7,
-                    traffic_light_color,
-                    2,
-                )
-
-            if traffic_light_state != previous_light_state:
-                print(
-                    f"Frame {frame_count}: light "
-                    f"{previous_light_state} -> {traffic_light_state}"
-                )
-                previous_light_state = traffic_light_state
 
             vehicle_boxes = []
             vehicle_ids = []

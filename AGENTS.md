@@ -13,7 +13,7 @@
 本專案是學校專題比賽作品，現階段以自行錄製的道路影片回測。預想使用者包含一般民眾、社區出入口管理者，以及路口事件的初步篩查人員。目標是讓交通違規偵測與場景設定更容易客製化，未來可與主管機關資料比對；現有輸出僅供輔助判斷，須由人員複核。
 
 - `python/main.py` 提供單一影像來源的 FastAPI／MJPEG 服務。第一幀供操作員在 `frontend/main.html` 點兩下設定停止線端點、逐點標示左右道路邊界並按 Enter 完成，再點虛線頂端建立 Gate 並調整角度；前端要求至少五條一般 Gate，開始後才逐幀分析。後端 `/save_points` 仍只要求至少三條 Gate。
-- YOLO11（目前預設 `yolo11x.pt`，可指定其他權重）與 ByteTrack 偵測、追蹤車輛；現有號誌顏色、停止線越線、`IN`／`OUT` 計數與 `ILLEGAL` 提示。`MOVING`／`STOPPED` 是影像位移分類，並非實際速度。
+- YOLO11（目前預設 `yolo11x.pt`，可指定其他權重）與 ByteTrack 偵測、追蹤車輛；現有號誌顏色、停止線越線、`IN`／`OUT` 計數與 `ILLEGAL` 提示。號誌偵測不依賴追蹤 ID；`MOVING`／`STOPPED` 是影像位移分類，並非實際速度。
 - `python/road_marking.py` 使用團隊訓練的 Stage-5 SegFormer checkpoint。按下 **Reload LaneNet** 後，服務才對下一張影格推論一次，釋放模型並快取標線結果供後續畫面顯示；類別色彩遮罩與折線像素座標也隨結果快取，避免每幀重建。目前不是逐幀分割。API 為 `POST /api/reload_lanenet`、`GET /api/road_markings`。
 - `cord_data/points_data.json` 是操作員產生的執行時校正資料。新版前端傳版本 3 JSON，後端保留停止線、Gate L/R、道路邊界、Gate 錨點與影像像素角度；舊版只傳 L/R 時仍使用版本 2。前端另可匯出／匯入版本 3 的 `gate_geometry.json`。Gate 的 `lane` 是固定道路車道數；前端暫以 Gate 1 = 0 m、每個一般 Gate 間隔 10 m、選配 `.4` Gate 相對前一一般 Gate 加 4 m 填入 `station_m`。
 - `python/gate_speed.py` 以同一車輛接地點的有限 Gate 穿越時間計算預估區間均速，依左右道路邊界的像素路徑長度比近似修正彎道內外車道差；`python/main.py` 將 `EST AVG ... km/h` 顯示於車輛框上方。距離未經現地測量，未做透視校正及實測車速驗證，不得描述為精確或執法測速。
@@ -53,7 +53,7 @@ py -3.12 -m unittest discover -s tests -v
 
 服務啟動後開啟 `http://127.0.0.1:8000`。需要 CPU 推論時用 `--device cpu`；切換 YOLO 權重用 `--model`。功能變更時，除相關單元測試外，還要以適用的影片或攝影機檢查受影響的 API／網頁流程。跨平台行為變更應在 Windows、macOS 各驗證一次，無法驗證的平台要在交付說明中標明。
 
-2026-09-17 的 Gate 與效能更改已在 macOS 以 `python3.12 -m unittest discover -s tests -v` 通過 19 項測試（含合成影格的車框上方速度文字測試），`python3.12 -m compileall -q python` 通過；前端另以本機 JavaScriptCore 模擬停止線、邊界、Gate、Enter、JSON 匯入與匯出邏輯。`start.command` 已通過 zsh 語法檢查及 `./start.command --help` 啟動檢查。合成 1280×720 標線疊圖測試由約 7.5 ms／幀降為 4.6 ms／幀，不代表完整流程 FPS。專案內目前無可用測試影片，尚未完成真實影片速度對照或 Windows 實測。
+2026-09-17 的 Gate、效能與號誌修正已在 macOS 以 `python3.12 -m unittest discover -s tests -v` 通過 20 項測試（含合成影格的車框上方速度文字，以及無追蹤 ID 時更新號誌的測試），`python3.12 -m compileall -q python` 通過；前端另以本機 JavaScriptCore 模擬停止線、邊界、Gate、Enter、JSON 匯入與匯出邏輯。`start.command` 已通過 zsh 語法檢查及 `./start.command --help` 啟動檢查。合成 1280×720 標線疊圖測試由約 7.5 ms／幀降為 4.6 ms／幀，不代表完整流程 FPS。專案內目前無可用測試影片，尚未完成真實影片速度對照或 Windows 實測。
 
 ## 未完成目標與實現辦法
 

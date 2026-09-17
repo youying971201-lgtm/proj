@@ -71,6 +71,77 @@ class FakeModel:
 
 
 class GateSpeedDisplayTests(unittest.TestCase):
+    def test_traffic_light_updates_without_tracking_ids(self):
+        class OneFrameCapture(FakeCapture):
+            def __init__(self):
+                super().__init__()
+                self.frames = self.frames[:1]
+
+        class UntrackedLightModel:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def track(self, *_args, **_kwargs):
+                boxes = type("Boxes", (), {
+                    "xyxy": FakeTensor([[100, 100, 130, 160]]),
+                    "id": None,
+                    "cls": FakeTensor([9]),
+                    "conf": FakeTensor([0.9]),
+                })()
+                return [type("Result", (), {"boxes": boxes})()]
+
+        class FakeLightDetector:
+            COLORS = {"UNKNOWN": (0, 0, 0), "GREEN": (0, 255, 0)}
+            updates = 0
+
+            def update(self, roi):
+                self.__class__.updates += 1
+                return "GREEN", self.COLORS["GREEN"], 0.0, 1.0
+
+        saved_state = dict(main.app.state._state)
+        saved_status = dict(main.runtime_status)
+        text_calls = []
+        original_put_text = cv2.putText
+
+        def collect_text(frame, value, origin, *args):
+            text_calls.append(value)
+            return original_put_text(frame, value, origin, *args)
+
+        main.app.state.video_config = {
+            "line": ((100, 50), (300, 50)), "in_transition": (-1, 1)
+        }
+        main.app.state.stop_line = [
+            {"x": 100 / 999, "y": 50 / 649},
+            {"x": 300 / 999, "y": 50 / 649},
+        ]
+        main.app.state.gates = []
+        main.app.state.road_boundaries = None
+        main.app.state.road_marking_result = None
+        main.app.state.road_marking_reload_requested = False
+        main.app.state.processing_started = True
+        main.app.state.cancel_requested = False
+        try:
+            with patch.object(main, "YOLO", UntrackedLightModel), \
+                 patch.object(main, "TrafficLightDetector", FakeLightDetector), \
+                 patch.object(main, "open_video_capture", return_value=OneFrameCapture()), \
+                 patch.object(main, "road_markings_for_frame", return_value=None), \
+                 patch.object(main, "estimate_camera_motion", return_value=(None, 0, 0)), \
+                 patch.object(main.frame_broadcaster, "publish"), \
+                 patch.object(main.frame_broadcaster, "finish"), \
+                 patch.object(main.cv2, "putText", side_effect=collect_text):
+                main.run_monitor(
+                    "cpu", main.MODEL_PATH, None, 1280, 0.38,
+                    "test.mp4", "test.mp4", False, "auto", 1000, 650, 10.0,
+                )
+        finally:
+            main.app.state._state.clear()
+            main.app.state._state.update(saved_state)
+            main.runtime_status.clear()
+            main.runtime_status.update(saved_status)
+
+        self.assertEqual(FakeLightDetector.updates, 1)
+        self.assertIn("GREEN", text_calls)
+
     def test_completed_gate_pair_draws_estimate_above_vehicle_box(self):
         saved_state = dict(main.app.state._state)
         saved_status = dict(main.runtime_status)
