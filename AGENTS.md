@@ -51,9 +51,9 @@ py -3.12 -m compileall -q python
 py -3.12 -m unittest discover -s tests -v
 ```
 
-服務啟動後開啟 `http://127.0.0.1:8000`。需要 CPU 推論時用 `--device cpu`；切換 YOLO 權重用 `--model`。功能變更時，除相關單元測試外，還要以適用的影片或攝影機檢查受影響的 API／網頁流程。跨平台行為變更應在 Windows、macOS 各驗證一次，無法驗證的平台要在交付說明中標明。
+服務啟動後開啟 `http://127.0.0.1:8000`。需要 CPU 推論時用 `--device cpu`；`--device auto` 依序選擇 CUDA、MPS、CPU，明確指定但不可用的加速裝置會退回 CPU；Stage-5 在 YOLO 選到 MPS 時仍使用 CPU。切換 YOLO 權重用 `--model`。功能變更時，除相關單元測試外，還要以適用的影片或攝影機檢查受影響的 API／網頁流程。跨平台行為變更應在 Windows、macOS 各驗證一次，無法驗證的平台要在交付說明中標明。
 
-2026-09-17 的 Gate、效能與號誌修正已在 macOS 以 `python3.12 -m unittest discover -s tests -v` 通過 20 項測試（含合成影格的車框上方速度文字，以及無追蹤 ID 時更新號誌的測試），`python3.12 -m compileall -q python` 通過；前端另以本機 JavaScriptCore 模擬停止線、邊界、Gate、Enter、JSON 匯入與匯出邏輯。`start.command` 已通過 zsh 語法檢查及 `./start.command --help` 啟動檢查。合成 1280×720 標線疊圖測試由約 7.5 ms／幀降為 4.6 ms／幀，不代表完整流程 FPS。專案內目前無可用測試影片，尚未完成真實影片速度對照或 Windows 實測。
+2026-09-17 的 Gate、效能、號誌與裝置選擇修正已在 macOS 以 `python3.12 -m unittest discover -s tests -v` 通過 21 項測試（含合成影格的車框上方速度文字、無追蹤 ID 時更新號誌及加速裝置回退測試），`python3.12 -m compileall -q python` 通過；前端另以本機 JavaScriptCore 模擬停止線、邊界、Gate、Enter、JSON 匯入與匯出邏輯。`start.command` 已通過 zsh 語法檢查及 `./start.command --help` 啟動檢查。合成 1280×720 標線疊圖測試由約 7.5 ms／幀降為 4.6 ms／幀，不代表完整流程 FPS。專案內目前無可用測試影片，尚未完成真實影片速度對照或 Windows 實測。
 
 ## 未完成目標與實現辦法
 

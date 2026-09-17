@@ -84,7 +84,7 @@ python3.12 python/main.py --road-marking-max-side 960
 python3.12 python/main.py --no-road-markings
 ```
 
-`--device auto` 依序選擇 MPS、CUDA、CPU。YOLO 輸入長邊目前於 MPS 使用 640，CUDA／CPU 使用 512；道路標線模型預設使用長邊 1280。Stage-5 在 YOLO 使用 MPS 時改用 CPU，使用 CUDA 時仍用 CUDA。Windows 攝影機無法讀取時可嘗試 `--camera-backend dshow` 或 `msmf`。其餘選項請在 macOS 執行 `python3.12 python/main.py --help`，或在 Windows 執行 `py -3.12 python\main.py --help`。
+`--device auto` 依序選擇 CUDA、MPS、CPU；明確指定 CUDA 或 MPS 但當前不可用時會改用 CPU。YOLO 輸入長邊目前於 MPS 使用 640，CUDA／CPU 使用 512；道路標線模型預設使用長邊 1280。Stage-5 在 YOLO 使用 MPS 時改用 CPU，使用 CUDA 時仍用 CUDA。Windows 攝影機無法讀取時可嘗試 `--camera-backend dshow` 或 `msmf`。其餘選項請在 macOS 執行 `python3.12 python/main.py --help`，或在 Windows 執行 `py -3.12 python\main.py --help`。
 
 Gate 與效能更改已在 macOS 使用 Python 3.12 執行 `python3.12 -m unittest discover -s tests -v`（19 項通過，含合成影格的車框上方速度文字測試）及 `python3.12 -m compileall -q python`。前端幾何與 JSON 流程以 JavaScriptCore 模擬測試通過，`start.command` 已通過 zsh 語法檢查及 `./start.command --help` 啟動檢查。專案目前沒有可用測試影片，尚未做真實車速對照、完整 MJPEG 畫面驗證或 Windows 實測。
 

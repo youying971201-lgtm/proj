@@ -370,16 +370,18 @@ def set_runtime_status(state, message):
 
 
 def resolve_device(requested_device):
-    """在 Apple Silicon 優先採用 MPS，無法使用時安全回退到 CPU。"""
+    """依實際可用加速裝置選擇 YOLO 推論，否則使用 CPU。"""
     if requested_device == "auto":
+        if torch.cuda.is_available():
+            return "cuda"
         if torch.backends.mps.is_available():
             return "mps"
-        elif torch.cuda.is_available():
-            return "cuda"
-        print("MPS 目前不可用，改用 CPU。可用 `python -c` 檢查 torch.backends.mps.is_available()。")
         return "cpu"
     if requested_device == "mps" and not torch.backends.mps.is_available():
         print("要求使用 MPS，但目前不可用；改用 CPU。")
+        return "cpu"
+    if requested_device == "cuda" and not torch.cuda.is_available():
+        print("要求使用 CUDA，但目前不可用；改用 CPU。")
         return "cpu"
     return requested_device
 
@@ -1163,7 +1165,7 @@ def main():
         "--device",
         default="auto",
         choices=("auto", "cpu", "cuda", "mps"),
-        help="預設 auto：依序使用 MPS、CUDA、CPU",
+        help="預設 auto：依序使用 CUDA、MPS、CPU；指定的加速裝置不可用時使用 CPU",
     )
     parser.add_argument(
         "--model",

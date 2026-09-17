@@ -92,6 +92,18 @@ class LaneNetReloadTests(unittest.TestCase):
         self.assertEqual(main.resolve_road_marking_device("cuda"), "cuda")
         self.assertEqual(main.resolve_road_marking_device("cpu"), "cpu")
 
+    def test_yolo_device_falls_back_to_cpu_when_requested_accelerator_is_unavailable(self):
+        with patch.object(main.torch.cuda, "is_available", return_value=False), \
+             patch.object(main.torch.backends.mps, "is_available", return_value=False):
+            self.assertEqual(main.resolve_device("auto"), "cpu")
+            self.assertEqual(main.resolve_device("cuda"), "cpu")
+            self.assertEqual(main.resolve_device("mps"), "cpu")
+
+        with patch.object(main.torch.cuda, "is_available", return_value=True), \
+             patch.object(main.torch.backends.mps, "is_available", return_value=True):
+            self.assertEqual(main.resolve_device("auto"), "cuda")
+            self.assertEqual(main.resolve_road_marking_device("cuda"), "cuda")
+
 
 if __name__ == "__main__":
     unittest.main()
