@@ -28,6 +28,7 @@
     }
     .steps {
       display: flex;
+      flex-wrap: wrap;
       gap: 8px;
       margin-bottom: 16px;
     }
@@ -70,6 +71,7 @@
       position: absolute;
       width: 100%;
       height: 100%;
+      touch-action: none;
     }
     .bottom {
       align-items: center;
@@ -114,6 +116,9 @@
       background: #aaa;
       cursor: not-allowed;
     }
+    .secondary {
+      background: #52657a;
+    }
     .gate-panel {
       background: #f0f0f0;
       border-radius: 8px;
@@ -140,6 +145,7 @@
       gap: 6px;
       padding: 7px;
       white-space: nowrap;
+      cursor: pointer;
     }
     .gate-row span {
       font-weight: 700;
@@ -221,13 +227,14 @@
       <nav class="steps">
         <span class="step active" id="previewStep">畫面預覽</span>
         <span class="step" id="stopStep">設定停止線</span>
+        <span class="step" id="boundaryStep">設定道路邊界</span>
         <span class="step" id="gateStep">設定閘門</span>
         <span class="step" id="runStep">開始判斷</span>
       </nav>
       <section class="stage">
         <div class="wrap">
           <img id="stream" alt="影片第一幀">
-          <canvas id="canvas"></canvas>
+          <canvas id="canvas" tabindex="0"></canvas>
         </div>
       </section>
       <section class="bottom">
@@ -235,6 +242,11 @@
         <label class="lane-default">預設車道數 
           <input id="defaultLane" type="number" min="1" value="1" disabled>
         </label>
+        <button class="start secondary" id="finishBoundary" disabled>完成此邊界（Enter）</button>
+        <button class="start secondary" id="fractionalGate" disabled>下一條為 .4 Gate</button>
+        <button class="start secondary" id="exportGeometry" disabled>匯出校正 JSON</button>
+        <button class="start secondary" id="importGeometry">匯入校正 JSON</button>
+        <input id="importFile" type="file" accept="application/json,.json" hidden>
         <button class="start" id="start" disabled>開始判斷</button>
         <button class="start" id="resetBtn" style="background: #e75050; display: none;">重新判斷</button>
         <button class="start" id="reloadLaneNet" disabled>Reload LaneNet</button>
@@ -246,7 +258,7 @@
           <span>尚未設定 Gate</span>
         </div>
       </section>
-      <p class="tip">按住左鍵拖曳：按下為 L、放開為 R。每條 Gate 自動使用目前的預設車道數。</p>
+      <p class="tip" id="instruction">點一下設定停止線 L 錨點，移動滑鼠預覽線段，再點一下設定 R。接著逐點標示左右邊界，按 Enter 完成。</p>
     </main>
     <aside class="tools">
       <button class="tool active" id="draw" title="線段繪製">╱</button>
@@ -305,6 +317,7 @@
     const steps = {
       preview: document.querySelector('#previewStep'),
       stop: document.querySelector('#stopStep'),
+      boundary: document.querySelector('#boundaryStep'),
       gate: document.querySelector('#gateStep'),
       run: document.querySelector('#runStep')
     };
@@ -333,11 +346,24 @@
     updateReloadAvailability();
     setInterval(updateReloadAvailability, 2000);
 
+    const finishBoundaryButton = document.querySelector('#finishBoundary'),
+      fractionalGateButton = document.querySelector('#fractionalGate'),
+      exportButton = document.querySelector('#exportGeometry'),
+      importButton = document.querySelector('#importGeometry'),
+      importFile = document.querySelector('#importFile'),
+      instruction = document.querySelector('#instruction');
+    const MIN_REGULAR_GATES = 5;
     let stopLine = null,
+      boundaries = { L: null, R: null },
+      boundaryDraft = [],
       gates = [],
+      selectedGateIndex = -1,
+      nextFractional = false,
+      undoStack = [],
       redoStack = [],
-      dragStart = null,
-      dragEnd = null,
+      pointerAction = null,
+      stopAnchor = null,
+      hoverPoint = null,
       drawing = true,
       colourIndex = 0;
 
@@ -350,8 +376,8 @@
     image.onload = () => {
       resize();
       if (!processingStarted) {
-        progress('stop');
-        status.textContent = '請拉線設定停止線。';
+        refresh();
+        status.textContent = '請點一下停止線 L 錨點，再點一下 R 錨點。';
       }
     };
 
@@ -365,8 +391,19 @@
     function normal(event) {
       const r = canvas.getBoundingClientRect();
       return {
-        x: Number(((event.clientX - r.left) / r.width).toFixed(5)),
-        y: Number(((event.clientY - r.top) / r.height).toFixed(5))
+        x: Number(Math.max(0, Math.min(1, (event.clientX - r.left) / r.width)).toFixed(5)),
+        y: Number(Math.max(0, Math.min(1, (event.clientY - r.top) / r.height)).toFixed(5))
+      };
+    }
+
+    function sourcePoint(p) {
+      return { x: p.x * image.naturalWidth, y: p.y * image.naturalHeight };
+    }
+
+    function normalizedPoint(p) {
+      return {
+        x: Number((p.x / image.naturalWidth).toFixed(5)),
+        y: Number((p.y / image.naturalHeight).toFixed(5))
       };
     }
 
@@ -382,7 +419,7 @@
       const a = onScreen(line.L),
         b = onScreen(line.R);
       ctx.strokeStyle = color;
-      ctx.lineWidth = 4;
+      ctx.lineWidth = 1;
       ctx.beginPath();
       ctx.moveTo(a.x, a.y);
       ctx.lineTo(b.x, b.y);
@@ -392,17 +429,165 @@
       ctx.fillText(label, a.x + 7, a.y - 8);
     }
 
-    function paintAll() {
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-      paint(stopLine, '#e75050', '停止線');
-      gates.forEach(g => paint(g.line, g.color, `${g.gate}｜${g.lane} 車道`));
-      if (dragStart && dragEnd) {
-        paint({ L: dragStart, R: dragEnd }, colours[colourIndex], '預覽');
+    function paintPath(points, color, label) {
+      if (!points || !points.length) return;
+      const first = onScreen(points[0]);
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1;
+      ctx.setLineDash([8, 5]);
+      ctx.beginPath();
+      ctx.moveTo(first.x, first.y);
+      points.slice(1).forEach(p => {
+        const q = onScreen(p);
+        ctx.lineTo(q.x, q.y);
+      });
+      ctx.stroke();
+      ctx.setLineDash([]);
+      points.forEach(p => {
+        const q = onScreen(p);
+        ctx.beginPath();
+        ctx.arc(q.x, q.y, 4, 0, Math.PI * 2);
+        ctx.fillStyle = color;
+        ctx.fill();
+      });
+      ctx.fillStyle = color;
+      ctx.font = 'bold 14px system-ui';
+      ctx.fillText(label, first.x + 7, first.y + 18);
+    }
+
+    function cross(a, b) { return a.x * b.y - a.y * b.x; }
+
+    function boundaryIntersection(anchor, axis, points, expectedSign) {
+      if (!points) return null;
+      const p = sourcePoint(anchor);
+      let closest = null;
+      for (let i = 1; i < points.length; i++) {
+        const a = sourcePoint(points[i - 1]), b = sourcePoint(points[i]);
+        const segment = { x: b.x - a.x, y: b.y - a.y };
+        const denominator = cross(axis, segment);
+        if (Math.abs(denominator) < 1e-8) continue;
+        const offset = { x: a.x - p.x, y: a.y - p.y };
+        const distance = cross(offset, segment) / denominator;
+        const part = cross(offset, axis) / denominator;
+        if (part < -1e-6 || part > 1 + 1e-6 || distance * expectedSign < 2) continue;
+        if (!closest || Math.abs(distance) < Math.abs(closest.distance)) {
+          closest = { distance, point: normalizedPoint({
+            x: p.x + distance * axis.x, y: p.y + distance * axis.y
+          }) };
+        }
+      }
+      return closest;
+    }
+
+    function resolveGate(anchor, angleDeg, roadBoundaries = boundaries) {
+      const angle = angleDeg * Math.PI / 180;
+      const axis = { x: Math.cos(angle), y: Math.sin(angle) };
+      const left = boundaryIntersection(anchor, axis, roadBoundaries.L, -1);
+      const right = boundaryIntersection(anchor, axis, roadBoundaries.R, 1);
+      return left && right ? { L: left.point, R: right.point } : null;
+    }
+
+    function gateHandle(gate) {
+      const anchor = sourcePoint(gate.anchor);
+      const right = gate.line ? sourcePoint(gate.line.R) : null;
+      const reach = right ? Math.hypot(right.x - anchor.x, right.y - anchor.y) : 80;
+      const length = Math.max(90, Math.min(150, reach * 0.7));
+      const angle = gate.angle_deg * Math.PI / 180;
+      return normalizedPoint({
+        x: anchor.x + Math.cos(angle) * length,
+        y: anchor.y + Math.sin(angle) * length
+      });
+    }
+
+    function paintGate(gate, index) {
+      if (gate.line) {
+        paint(gate.line, gate.color, `${gate.gate}｜${gate.lane} 車道`);
+      } else {
+        const anchor = onScreen(gate.anchor), angle = gate.angle_deg * Math.PI / 180;
+        const scale = canvas.width / image.naturalWidth;
+        ctx.strokeStyle = '#e75050';
+        ctx.lineWidth = 1;
+        ctx.setLineDash([6, 5]);
+        ctx.beginPath();
+        ctx.moveTo(anchor.x - 90 * Math.cos(angle) * scale, anchor.y - 90 * Math.sin(angle) * scale);
+        ctx.lineTo(anchor.x + 90 * Math.cos(angle) * scale, anchor.y + 90 * Math.sin(angle) * scale);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.fillStyle = '#e75050';
+        ctx.fillText(`${gate.gate}：未接到兩側邊界`, anchor.x + 7, anchor.y - 8);
+      }
+      if (index === selectedGateIndex) {
+        const anchor = onScreen(gate.anchor), handle = onScreen(gateHandle(gate));
+        ctx.strokeStyle = gate.color;
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(anchor.x, anchor.y);
+        ctx.lineTo(handle.x, handle.y);
+        ctx.stroke();
+        for (const [point, radius] of [[anchor, 6], [handle, 9]]) {
+          ctx.beginPath();
+          ctx.arc(point.x, point.y, radius, 0, Math.PI * 2);
+          ctx.fillStyle = '#fff';
+          ctx.fill();
+          ctx.stroke();
+        }
       }
     }
 
+    function paintAll() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      paint(stopLine, '#e75050', '停止線');
+      paintPath(boundaries.L, '#24b5c9', 'L 邊界');
+      paintPath(boundaries.R, '#edb42c', 'R 邊界');
+      const phase = currentPhase();
+      if ((boundaryDraft.length || hoverPoint) && (phase === 'left' || phase === 'right')) {
+        const side = phase === 'left' ? 'L' : 'R';
+        paintPath([stopLine[side], ...boundaryDraft, ...(hoverPoint ? [hoverPoint] : [])],
+          side === 'L' ? '#24b5c9' : '#edb42c', `${side} 邊界預覽`);
+      }
+      gates.forEach(paintGate);
+      if (stopAnchor && hoverPoint) {
+        paint({ L: stopAnchor, R: hoverPoint }, '#e75050', '停止線預覽');
+      }
+    }
+
+    function currentPhase() {
+      if (!stopLine) return 'stop';
+      if (!boundaries.L) return 'left';
+      if (!boundaries.R) return 'right';
+      return 'gate';
+    }
+
+    function snapshot() {
+      return JSON.parse(JSON.stringify({
+        stopLine, boundaries, boundaryDraft, gates, selectedGateIndex, nextFractional,
+        laneCount: Number(defaultLaneInput.value)
+      }));
+    }
+
+    function restore(state) {
+      ({ stopLine, boundaries, boundaryDraft, gates, selectedGateIndex, nextFractional } = state);
+      stopAnchor = hoverPoint = null;
+      defaultLaneInput.value = state.laneCount;
+      refresh();
+    }
+
+    function recordChange() {
+      undoStack.push(snapshot());
+      redoStack = [];
+    }
+
+    function regularGateCount() {
+      return gates.filter(g => !g.gate.endsWith('.4')).length;
+    }
+
+    function readyToStart() {
+      return currentPhase() === 'gate' && regularGateCount() >= MIN_REGULAR_GATES &&
+        gates.every(g => g.line !== null);
+    }
+
     function progress(active) {
-      const names = ['preview', 'stop', 'gate', 'run'],
+      const names = ['preview', 'stop', 'boundary', 'gate', 'run'],
         at = names.indexOf(active);
       names.forEach((name, i) => {
         steps[name].className = `step ${i < at ? 'done' : i === at ? 'active' : ''}`;
@@ -410,114 +595,260 @@
     }
 
     function refresh() {
-      progress(stopLine ? (gates.length >= 3 ? 'run' : 'gate') : 'stop');
+      const phase = currentPhase();
+      progress(processingStarted ? 'run' : phase === 'stop' ? 'stop' :
+        phase === 'gate' && readyToStart() ? 'run' : phase === 'gate' ? 'gate' : 'boundary');
       defaultLaneInput.disabled = !stopLine;
-      undoButton.disabled = !stopLine;
+      undoButton.disabled = !undoStack.length;
       redoButton.disabled = !redoStack.length;
-      startButton.disabled = gates.length < 3;
+      startButton.disabled = !readyToStart() || processingStarted;
+      finishBoundaryButton.disabled = !drawing || !['left', 'right'].includes(phase) || !boundaryDraft.length;
+      fractionalGateButton.disabled = !drawing || phase !== 'gate' || !gates.length ||
+        gates[gates.length - 1].gate.endsWith('.4');
+      fractionalGateButton.textContent = nextFractional ? '下一條：.4 Gate ✓' : '下一條為 .4 Gate';
+      exportButton.disabled = !readyToStart();
       colourButton.style.background = colours[colourIndex];
       drawButton.classList.toggle('active', drawing);
       gateList.innerHTML = gates.length
-        ? gates.map((g, i) => `<label class="gate-row"><span>Gate ${i + 1}</span><input type="number" min="1" value="${g.lane}" data-index="${i}"> 車道</label>`).join('')
+        ? gates.map((g, i) => `<button type="button" class="gate-row" data-index="${i}"><span>${g.gate}</span> ${g.line ? `${g.angle_deg.toFixed(1)}°` : '⚠ 邊界未相交'}</button>`).join('')
         : '<span>尚未設定 Gate</span>';
+      instruction.textContent = phase === 'stop'
+        ? '先點停止線 L 錨點，再點 R 錨點；線段會跟隨滑鼠預覽。停止線須跨越所有要校正的車道。'
+        : phase === 'left' || phase === 'right'
+          ? `從停止線 ${phase === 'left' ? 'L' : 'R'} 端沿道路邊界逐點點擊；線段會跟隨滑鼠，按 Enter 完成此邊界。`
+          : '點選白色虛線頂端建立 Gate；選取 Gate 後拖曳圓形把手調整角度，線段會自動接到左右邊界。至少需要 5 個一般 Gate。';
       paintAll();
     }
 
-    function addLine(line) {
-      if (!stopLine) {
-        stopLine = line;
-        status.textContent = '✅ 停止線完成，請在下方確認預設車道數後標示 Gate 1。';
+    function validLaneCount() {
+      const count = Number(defaultLaneInput.value);
+      return Number.isInteger(count) && count >= 1 ? count : null;
+    }
+
+    function distanceInSource(a, b) {
+      const p = sourcePoint(a), q = sourcePoint(b);
+      return Math.hypot(p.x - q.x, p.y - q.y);
+    }
+
+    function nextGateData() {
+      const last = gates[gates.length - 1];
+      const previousNumber = last ? Number(last.gate.match(/Gate (\d+)/)[1]) : 0;
+      const number = nextFractional ? previousNumber : previousNumber + 1;
+      return {
+        gate: `Gate ${number}${nextFractional ? '.4' : ''}`,
+        station_m: (number - 1) * 10 + (nextFractional ? 4 : 0)
+      };
+    }
+
+    function addGate(anchor) {
+      const lane = validLaneCount();
+      if (!lane) {
+        status.textContent = '❌ 請先填寫有效的預設車道數。';
         defaultLaneInput.focus();
-      } else {
-        const lane = Number(defaultLaneInput.value);
-        if (!Number.isInteger(lane) || lane < 1) {
-          status.textContent = '❌ 請填寫有效的預設車道數。';
-          defaultLaneInput.focus();
-          return;
-        }
-        const order = gates.length + 1;
-        gates.push({
-          gate: `Gate ${order}`,
-          lane,
-          station_m: order * 10,
-          line,
-          color: colours[colourIndex]
-        });
-        redoStack = [];
-        status.textContent = `✅ Gate ${order} 完成（${lane} 車道），可繼續標示 Gate ${order + 1}。`;
+        return;
       }
+      const last = gates[gates.length - 1];
+      const angle_deg = last ? last.angle_deg : Math.atan2(
+        (stopLine.R.y - stopLine.L.y) * image.naturalHeight,
+        (stopLine.R.x - stopLine.L.x) * image.naturalWidth
+      ) * 180 / Math.PI;
+      const line = resolveGate(anchor, angle_deg);
+      recordChange();
+      gates.push({ ...nextGateData(), anchor, angle_deg, line,
+        lane, color: colours[colourIndex] });
+      selectedGateIndex = gates.length - 1;
+      nextFractional = false;
+      status.textContent = line
+        ? `✅ ${gates[selectedGateIndex].gate} 已建立。拖曳圓形把手可調整角度。`
+        : '⚠ Gate 尚未與兩側邊界相交；請拖曳圓形把手調整角度或重畫邊界。';
       refresh();
+    }
+
+    function nearbyGateIndex(point, getPosition) {
+      const screen = onScreen(point);
+      for (let i = gates.length - 1; i >= 0; i--) {
+        const candidate = onScreen(getPosition(gates[i]));
+        if (Math.hypot(screen.x - candidate.x, screen.y - candidate.y) <= 13) return i;
+      }
+      return -1;
+    }
+
+    function updateRotation(index, point) {
+      const gate = gates[index], a = sourcePoint(gate.anchor), p = sourcePoint(point);
+      if (Math.hypot(p.x - a.x, p.y - a.y) < 8) return;
+      gate.angle_deg = Math.atan2(p.y - a.y, p.x - a.x) * 180 / Math.PI;
+      gate.line = resolveGate(gate.anchor, gate.angle_deg);
+      paintAll();
     }
 
     canvas.onpointerdown = e => {
       if (e.button !== 0 || !drawing || !image.naturalWidth) return;
-      dragStart = normal(e);
-      dragEnd = dragStart;
+      canvas.focus();
+      const point = normal(e), phase = currentPhase();
+      if (phase === 'stop') {
+        pointerAction = { kind: 'stop-click' };
+      } else if (phase === 'gate') {
+        const handleIndex = nearbyGateIndex(point, gateHandle);
+        if (handleIndex >= 0 && handleIndex === selectedGateIndex) {
+          pointerAction = { kind: 'rotate', index: handleIndex, before: snapshot() };
+        } else {
+          const anchorIndex = nearbyGateIndex(point, gate => gate.anchor);
+          if (anchorIndex >= 0) {
+            selectedGateIndex = anchorIndex;
+            status.textContent = `${gates[anchorIndex].gate} 已選取；拖曳圓形把手調整角度。`;
+            refresh();
+            return;
+          }
+          pointerAction = { kind: 'place' };
+        }
+      } else {
+        pointerAction = { kind: 'boundary' };
+      }
       canvas.setPointerCapture(e.pointerId);
-      paintAll();
       e.preventDefault();
     };
 
     canvas.onpointermove = e => {
-      if (!dragStart) return;
-      dragEnd = normal(e);
-      paintAll();
+      const point = normal(e);
+      if (!pointerAction || pointerAction.kind !== 'rotate') {
+        hoverPoint = point;
+        paintAll();
+      } else {
+        updateRotation(pointerAction.index, point);
+      }
     };
 
     canvas.onpointerup = e => {
-      if (!dragStart) return;
-      const line = { L: dragStart, R: normal(e) };
-      dragStart = dragEnd = null;
-      if (canvas.hasPointerCapture(e.pointerId)) {
-        canvas.releasePointerCapture(e.pointerId);
+      if (!pointerAction) return;
+      const action = pointerAction, point = normal(e);
+      pointerAction = null;
+      if (canvas.hasPointerCapture(e.pointerId)) canvas.releasePointerCapture(e.pointerId);
+      if (action.kind === 'stop-click') {
+        if (!stopAnchor) {
+          stopAnchor = point;
+          hoverPoint = point;
+          status.textContent = '已固定 L 錨點；移動滑鼠預覽，點一下設定 R 錨點。';
+        } else if (distanceInSource(stopAnchor, point) < 15) {
+          status.textContent = '❌ 停止線太短，請點更遠的 R 錨點。';
+        } else {
+          recordChange();
+          stopLine = { L: stopAnchor, R: point };
+          stopAnchor = hoverPoint = null;
+          status.textContent = '✅ 停止線完成；請從 L 端沿道路點選左邊界。';
+        }
+      } else if (action.kind === 'boundary') {
+        const side = currentPhase() === 'left' ? 'L' : 'R';
+        const previous = boundaryDraft.at(-1) || stopLine[side];
+        if (distanceInSource(previous, point) >= 5) {
+          recordChange();
+          boundaryDraft.push(point);
+          status.textContent = `已加入 ${side} 邊界點；移動滑鼠預覽下一段，按 Enter 完成。`;
+        }
+      } else if (action.kind === 'place') {
+        addGate(point);
+      } else if (action.kind === 'rotate') {
+        updateRotation(action.index, point);
+        if (Math.abs(gates[action.index].angle_deg - action.before.gates[action.index].angle_deg) > 0.01) {
+          undoStack.push(action.before);
+          redoStack = [];
+          status.textContent = gates[action.index].line
+            ? `✅ ${gates[action.index].gate} 角度已調整。`
+            : '⚠ Gate 尚未與兩側邊界相交，請繼續調整角度。';
+        }
       }
-      addLine(line);
+      refresh();
     };
 
     canvas.onpointercancel = () => {
-      dragStart = dragEnd = null;
+      if (pointerAction?.kind === 'rotate') restore(pointerAction.before);
+      pointerAction = null;
+      refresh();
+    };
+
+    canvas.onpointerleave = () => {
+      if (pointerAction?.kind === 'rotate') return;
+      hoverPoint = null;
       paintAll();
     };
 
-    gateList.onchange = e => {
-      const input = e.target;
-      if (!input.matches('[data-index]')) return;
-      const gate = gates[Number(input.dataset.index)],
-        lane = Number(input.value);
-      if (!Number.isInteger(lane) || lane < 1) {
-        input.value = gate.lane;
+    finishBoundaryButton.onclick = () => {
+      const phase = currentPhase();
+      if (!['left', 'right'].includes(phase) || !boundaryDraft.length) return;
+      const side = phase === 'left' ? 'L' : 'R';
+      if (distanceInSource(stopLine[side], boundaryDraft[0]) < 15) {
+        status.textContent = '❌ 邊界太短，請沿道路加入更遠的點。';
         return;
       }
-      gate.lane = lane;
-      status.textContent = `${gate.gate} 已改為 ${lane} 車道。`;
+      recordChange();
+      boundaries[side] = [stopLine[side], ...boundaryDraft];
+      boundaryDraft = [];
+      hoverPoint = null;
+      status.textContent = side === 'L'
+        ? '✅ 左邊界完成；請從 R 端沿道路點選右邊界。'
+        : '✅ 兩側邊界完成；請點白色虛線頂端建立 Gate 1。';
+      refresh();
+    };
+
+    window.addEventListener('keydown', e => {
+      if (e.key === 'Escape') {
+        stopAnchor = hoverPoint = null;
+        paintAll();
+      }
+      if (e.key === 'Enter' && e.target?.tagName !== 'INPUT' &&
+          !finishBoundaryButton.disabled) {
+        e.preventDefault();
+        finishBoundaryButton.onclick();
+      }
+    });
+
+    fractionalGateButton.onclick = () => {
+      if (fractionalGateButton.disabled) return;
+      recordChange();
+      nextFractional = !nextFractional;
+      status.textContent = nextFractional ? '下一次點擊會新增選配的 .4 Gate。' : '下一次點擊會新增一般 Gate。';
+      refresh();
+    };
+
+    gateList.onclick = e => {
+      const row = e.target.closest('[data-index]');
+      if (!row) return;
+      selectedGateIndex = Number(row.dataset.index);
+      status.textContent = `${gates[selectedGateIndex].gate} 已選取；拖曳圓形把手調整角度。`;
+      refresh();
+    };
+
+    defaultLaneInput.onchange = () => {
+      const lane = validLaneCount();
+      if (!lane) {
+        status.textContent = '❌ 車道數須為正整數。';
+        return;
+      }
+      if (gates.some(g => g.lane !== lane)) {
+        recordChange();
+        gates.forEach(g => { g.lane = lane; });
+      }
+      status.textContent = `整條道路設定為 ${lane} 車道。`;
       refresh();
     };
 
     drawButton.onclick = () => {
       drawing = !drawing;
-      status.textContent = drawing ? '線段繪製已啟用。' : '線段繪製已暫停。';
+      status.textContent = drawing ? '校正繪製已啟用。' : '校正繪製已暫停。';
       refresh();
     };
 
     undoButton.onclick = () => {
-      if (gates.length) {
-        redoStack.push(gates.pop());
-      } else if (stopLine) {
-        redoStack.push({ stop: true, line: stopLine });
-        stopLine = null;
-      }
+      if (!undoStack.length) return;
+      redoStack.push(snapshot());
+      restore(undoStack.pop());
       status.textContent = '已回到上一步。';
-      refresh();
     };
 
     redoButton.onclick = () => {
-      const item = redoStack.pop();
-      if (item) {
-        if (item.stop) stopLine = item.line;
-        else gates.push(item);
-        status.textContent = '已重做。';
-        refresh();
-      }
+      if (!redoStack.length) return;
+      undoStack.push(snapshot());
+      restore(redoStack.pop());
+      status.textContent = '已重做。';
     };
 
     colourButton.onclick = () => {
@@ -526,14 +857,121 @@
       refresh();
     };
 
+    function geometryDocument() {
+      return {
+        schema_version: 3,
+        video: {
+          coordinate_system: 'normalized_0_to_1',
+          width: image.naturalWidth,
+          height: image.naturalHeight
+        },
+        lane_count: validLaneCount(),
+        stop_line: { line: stopLine },
+        road_boundaries: boundaries,
+        gates: gates.map(({ color, line, ...gate }) => ({
+          ...gate, angle_deg: Number(gate.angle_deg.toFixed(3))
+        }))
+      };
+    }
+
+    function legacySavePayload() {
+      return {
+        stop_line: { line: stopLine },
+        gates: gates.map(({ gate, lane, station_m, line }) => ({ gate, lane, station_m, line }))
+      };
+    }
+
+    exportButton.onclick = () => {
+      if (!readyToStart()) return;
+      const blob = new Blob([JSON.stringify(geometryDocument(), null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = 'gate_geometry.json';
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      status.textContent = '✅ 已匯出完整校正 JSON；請妥善對應原始影片。';
+    };
+
+    function checkPoint(point) {
+      if (!point || !Number.isFinite(point.x) || !Number.isFinite(point.y) ||
+          point.x < 0 || point.x > 1 || point.y < 0 || point.y > 1) {
+        throw Error('座標必須是 0～1 的正規化位置');
+      }
+      return { x: point.x, y: point.y };
+    }
+
+    function loadGeometry(data) {
+      if (data.schema_version !== 3 || data.video?.coordinate_system !== 'normalized_0_to_1') {
+        throw Error('請選擇本頁匯出的版本 3 校正 JSON');
+      }
+      if (data.video.width !== image.naturalWidth || data.video.height !== image.naturalHeight) {
+        throw Error('JSON 的原始影像尺寸與目前影片不同');
+      }
+      const line = { L: checkPoint(data.stop_line?.line?.L), R: checkPoint(data.stop_line?.line?.R) };
+      if (distanceInSource(line.L, line.R) < 15) throw Error('停止線太短');
+      const count = Number(data.lane_count);
+      if (!Number.isInteger(count) || count < 1) throw Error('車道數須為正整數');
+      const importedBoundaries = {};
+      for (const side of ['L', 'R']) {
+        const points = data.road_boundaries?.[side];
+        if (!Array.isArray(points) || points.length < 2) throw Error(`${side} 邊界至少需要兩個點`);
+        importedBoundaries[side] = points.map(checkPoint);
+        if (distanceInSource(importedBoundaries[side][0], line[side]) > 2) {
+          throw Error(`${side} 邊界必須從停止線端點開始`);
+        }
+      }
+      if (!Array.isArray(data.gates) || data.gates.length < MIN_REGULAR_GATES) {
+        throw Error('JSON 至少需要五條 Gate');
+      }
+      const importedGates = data.gates.map((gate, index) => {
+        if (!/^Gate [1-9]\d*(?:\.4)?$/.test(gate.gate)) throw Error('Gate 名稱格式錯誤');
+        const anchor = checkPoint(gate.anchor);
+        const angle_deg = Number(gate.angle_deg);
+        const station_m = Number(gate.station_m);
+        if (!Number.isFinite(angle_deg) || !Number.isFinite(station_m)) {
+          throw Error('Gate 角度或里程無效');
+        }
+        const resolved = resolveGate(anchor, angle_deg, importedBoundaries);
+        if (!resolved) throw Error(`${gate.gate} 未與兩側邊界相交`);
+        return { gate: gate.gate, lane: count, station_m,
+          anchor, angle_deg, line: resolved, color: colours[index % colours.length] };
+      });
+      if (importedGates.filter(g => !g.gate.endsWith('.4')).length < MIN_REGULAR_GATES ||
+          importedGates.some((g, i) => i && g.station_m <= importedGates[i - 1].station_m)) {
+        throw Error('Gate 數量或里程順序無效');
+      }
+      recordChange();
+      stopLine = line;
+      boundaries = importedBoundaries;
+      boundaryDraft = [];
+      stopAnchor = hoverPoint = null;
+      gates = importedGates;
+      selectedGateIndex = -1;
+      nextFractional = false;
+      defaultLaneInput.value = count;
+      status.textContent = `✅ 已匯入 ${importedGates.length} 條 Gate；請確認畫面與原始影片相符。`;
+      refresh();
+    }
+
+    importButton.onclick = () => importFile.click();
+    importFile.onchange = async () => {
+      const file = importFile.files?.[0];
+      if (!file) return;
+      try {
+        loadGeometry(JSON.parse(await file.text()));
+      } catch (error) {
+        status.textContent = '❌ 匯入失敗：' + error.message;
+      } finally {
+        importFile.value = '';
+      }
+    };
+
     async function request(url) {
       const response = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: url === '/save_points' ? JSON.stringify({
-          stop_line: { line: stopLine },
-          gates: gates.map(({ color, ...gate }) => gate)
-        }) : undefined
+        body: url === '/save_points' ? JSON.stringify(legacySavePayload()) : undefined
       });
       const data = await response.json();
       if (!response.ok) throw Error(data.detail);
@@ -543,6 +981,7 @@
     
     startButton.onclick = async () => {
       try {
+        if (!readyToStart()) throw Error('請先完成至少五條一般 Gate，並確認每條 Gate 都接到兩側邊界');
         await request('/save_points');
         await request('/start_processing');
         processingStarted = true;

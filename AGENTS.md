@@ -12,16 +12,16 @@
 
 本專案是學校專題比賽作品，現階段以自行錄製的道路影片回測。預想使用者包含一般民眾、社區出入口管理者，以及路口事件的初步篩查人員。目標是讓交通違規偵測與場景設定更容易客製化，未來可與主管機關資料比對；現有輸出僅供輔助判斷，須由人員複核。
 
-- `python/main.py` 提供單一影像來源的 FastAPI／MJPEG 服務。第一幀供操作員在 `frontend/main.html` 校正停止線與至少三條 Gate，開始後才逐幀分析。
+- `python/main.py` 提供單一影像來源的 FastAPI／MJPEG 服務。第一幀供操作員在 `frontend/main.html` 點兩下設定停止線端點、逐點標示左右道路邊界並按 Enter 完成，再點虛線頂端建立 Gate 並調整角度；前端要求至少五條一般 Gate，開始後才逐幀分析。後端 `/save_points` 仍只要求至少三條 Gate。
 - YOLO11（目前預設 `yolo11x.pt`，可指定其他權重）與 ByteTrack 偵測、追蹤車輛；現有號誌顏色、停止線越線、`IN`／`OUT` 計數與 `ILLEGAL` 提示。`MOVING`／`STOPPED` 是影像位移分類，並非實際速度。
 - `python/road_marking.py` 使用團隊訓練的 Stage-5 SegFormer checkpoint。按下 **Reload LaneNet** 後，服務才對下一張影格推論一次，釋放模型並快取標線結果供後續畫面顯示；目前不是逐幀分割。API 為 `POST /api/reload_lanenet`、`GET /api/road_markings`。
-- `cord_data/points_data.json` 是操作員產生的執行時校正資料。Gate 的 `lane` 是車道數，前端目前以 `Gate 序號 × 10` 填入 `station_m`；此數字未經現地測量，主程式尚未用 Gate 測速。
+- `cord_data/points_data.json` 是操作員產生的執行時校正資料，後端目前仍以版本 2 格式儲存停止線與 Gate L/R。前端另可匯出／匯入版本 3 的 `gate_geometry.json`，包含道路邊界、Gate 錨點與原始影像像素角度；這些新欄位尚未接入 `python/main.py` 的持久化。Gate 的 `lane` 是固定道路車道數；前端暫以 Gate 1 = 0 m、每個一般 Gate 間隔 10 m、選配 `.4` Gate 相對前一一般 Gate 加 4 m 填入 `station_m`。距離未經現地測量，主程式尚未用 Gate 測速。
 - 違規變道（跨越實線、未打方向燈）、Gate 測速及雲端多鏡頭監看仍屬規劃，不能寫成已完成或已驗證的功能。
 
 ## 專案結構
 
 - `python/`：`main.py` 為服務與分析流程；`Car.py`、`trafficLight.py` 為車輛與號誌邏輯；`road_marking.py` 為標線分割；`video_source.py` 為影片、串流與攝影機來源。
-- `frontend/main.html`：目前服務使用的操作介面。`frontend/main2.html`、`frontend/toweb.py` 為其他／舊版介面或輔助程式。
+- `frontend/main.html`：目前服務使用的操作介面；道路邊界與錨點角度在此計算並可匯出版本 3 JSON。`frontend/main2.html`、`frontend/toweb.py` 為其他／舊版介面或輔助程式。
 - `cord_data/points_data.json`：按影像來源校正的停止線與 Gate；不得把某支影片的座標當成其他場景的通用設定。
 - `inputVideos/`、`models/road_marking/`、`result/lanenet/`：分別放本機輸入影片、Stage-5 權重、精選的定性驗證圖。`result/yolo/` 預留 YOLO 成果。
 - `tests/`：已有影像來源、道路標線座標及 Reload LaneNet 相關測試。`yaml/my_track.yaml` 為設定範例；主程式目前指定 Ultralytics 的 `bytetrack.yaml`。

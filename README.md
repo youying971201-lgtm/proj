@@ -38,7 +38,7 @@ flowchart LR
 ```
 
 1. **準備來源。** 未指定時，程式讀取 `inputVideos/IMG_6898.MOV`；也可用 `--source` 指定影片／串流，或用 `--camera` 選擇實體、虛擬攝影機。
-2. **校正畫面。** 伺服器先顯示第一幀，此時不執行 YOLO。於網頁上先畫停止線，再依序畫至少三條 Gate，設定每條 Gate 的車道數。
+2. **校正畫面。** 伺服器先顯示第一幀，此時不執行 YOLO。於網頁上點兩下設定停止線端點、逐點標出道路左右邊界並按 Enter 完成，再點選虛線頂端建立至少五條一般 Gate，並設定整條路的車道數。
 3. **啟動判斷。** 點選「開始判斷」後，網頁先呼叫 `/save_points` 寫入校正檔，再呼叫 `/start_processing` 啟動背景工作。影片會從指定的起始影格重新讀取。
 4. **查看結果。** 網頁顯示車輛 ID、偵測框、`MOVING`／`STOPPED` 狀態、號誌顏色及 `IN`／`OUT` 越線計數。開始判斷後按「Reload LaneNet」才會偵測道路標線並顯示快取結果，座標可由 API 讀取；終端機在處理結束時輸出本次統計。
 5. **重新處理或結束。**「重新判斷」會中止目前工作並以網頁上的校正重新開始；「關閉系統」會停止服務。目前只持久儲存校正資料，沒有匯出標註影片、逐筆事件或統計報表。
@@ -82,15 +82,17 @@ python3.12 python/main.py --road-marking-max-side 960
 python3.12 python/main.py --no-road-markings
 ```
 
-`--device auto` 依序選擇 MPS、CUDA、CPU。YOLO 輸入長邊目前於 MPS 使用 960，CUDA／CPU 使用 640；道路標線模型預設使用長邊 1280。Stage-5 在 YOLO 使用 MPS 時改用 CPU，使用 CUDA 時仍用 CUDA。Windows 攝影機無法讀取時可嘗試 `--camera-backend dshow` 或 `msmf`。其餘選項請在 macOS 執行 `python3.12 python/main.py --help`，或在 Windows 執行 `py -3.12 python\main.py --help`。
+`--device auto` 依序選擇 MPS、CUDA、CPU。YOLO 輸入長邊目前於 MPS 使用 640，CUDA／CPU 使用 512；道路標線模型預設使用長邊 1280。Stage-5 在 YOLO 使用 MPS 時改用 CPU，使用 CUDA 時仍用 CUDA。Windows 攝影機無法讀取時可嘗試 `--camera-backend dshow` 或 `msmf`。其餘選項請在 macOS 執行 `python3.12 python/main.py --help`，或在 Windows 執行 `py -3.12 python\main.py --help`。
 
 `start.command` 與 `start.bat` 目前尚未固定使用 Python 3.12.x；依賴 `start.bat` 的 `start-virtual-camera.bat` 也暫勿使用。請先使用上面的明確版本指令；若要使用 Windows 的 OBS Virtual Camera，先啟動它，再以 `py -3.12 python\main.py --camera 1 --camera-width 1280 --camera-height 720 --camera-fps 30 --device cuda` 啟動，並確認裝置、索引及 CUDA 可用。若只想驗證道路標線模型，macOS 可執行 `python3.12 python/road_marking_demo.py /path/to/image.jpg`，產生單張影像的疊圖與 JSON 座標。
 
 ## 停止線與 Gate 校正
 
-在第一幀畫面按住滑鼠左鍵拖曳；按下的位置為 **L**，放開的位置為 **R**。第一條是停止線，之後依序為 Gate 1、Gate 2、Gate 3……。畫完停止線後可調整「預設車道數」，新 Gate 會使用當下的數值，也可在 Gate 清單修改個別車道數。工具列提供暫停繪製、復原、重做與變更預覽顏色。
+在第一幀畫面先點一下**停止線**的 **L** 錨點，移動滑鼠可即時預覽線段，再點一下設定 **R**；停止線應跨越所有要校正的車道。接著從停止線 L 端沿道路逐點點擊左邊界，移動滑鼠時會預覽目前點到滑鼠位置的線段，按 **Enter** 完成；再從 R 端逐點點擊右邊界並按 Enter 完成。邊界可用多點貼合彎道，也可按畫面上的完成按鈕。畫面中的校正線段寬度為 1 px。設定整條路的預設車道數後，逐次點選白色虛線頂端建立 Gate；點選 Gate 清單項目，再拖曳與錨點分開的圓形把手調整角度。前端將經過錨點的直線與兩側邊界求交，交點就是有限 Gate 的兩端。Gate 無法與兩側邊界相交時會顯示警示，不能開始判斷。工具列可暫停繪製、復原、重做及更換 Gate 顏色。
 
-前端自動設定 `station_m = Gate 序號 × 10`，目前沒有編輯實際里程的欄位，也不會從道路標線自動推算 Gate 距離。`lane` 在現行資料格式代表**車道數**，並非車道編號；`station_m` 尚未供主程式測速。至少三條 Gate 才能開始。按下「開始判斷」時，資料會以原始畫面寬高的 **0～1 正規化座標** 寫入 `cord_data/points_data.json`：
+道路車道數固定時，調整「預設車道數」會套用至所有 Gate；它不能單獨推算遠處的畫面寬度，因此仍須標出道路邊界。停止線提供邊界起點與 Gate 初始角度，之後每條 Gate 可自行調整。這只是影像上的人工幾何校正，並未保證 Gate 在真實道路平面與車道方向成 90 度。
+
+前端至少需要五條一般 Gate；在一般 Gate 後可選擇下一條為 `Gate X.4`，表示同週期後 4 公尺的選配位置。前端暫以 `Gate 1 = 0`、`Gate 1.4 = 4`、`Gate 2 = 10` 公尺依序填入 `station_m`，**尚未以現地尺寸或透視校正驗證**，不可直接用於測速。`lane` 代表車道數而非車道編號。按「開始判斷」時，前端把 Gate 換算成現有 `/save_points` 接受的正規化 L/R 線段，後端仍寫入 `cord_data/points_data.json` 的版本 2 格式，例如：
 
 停止線兩端的順序會影響跨線側別與 `IN`／`OUT` 的方向；不同影片可在 `python/main.py` 的 `VIDEO_CONFIGS` 設定 `in_transition`。未列入的來源預設以上側到下側為 `IN`，校正時應依畫面中的行進方向確認。
 
@@ -100,14 +102,18 @@ python3.12 python/main.py --no-road-markings
   "video": {"name": "example.mp4", "coordinate_system": "normalized_0_to_1"},
   "stop_line": {"line": {"L": {"x": 0.15, "y": 0.60}, "R": {"x": 0.85, "y": 0.60}}},
   "gates": [
-    {"gate": "Gate 1", "lane": 2, "station_m": 10, "line": {"L": {"x": 0.15, "y": 0.65}, "R": {"x": 0.85, "y": 0.65}}},
-    {"gate": "Gate 2", "lane": 2, "station_m": 20, "line": {"L": {"x": 0.15, "y": 0.70}, "R": {"x": 0.85, "y": 0.70}}},
-    {"gate": "Gate 3", "lane": 2, "station_m": 30, "line": {"L": {"x": 0.15, "y": 0.75}, "R": {"x": 0.85, "y": 0.75}}}
+    {"gate": "Gate 1", "lane": 2, "station_m": 0, "line": {"L": {"x": 0.15, "y": 0.65}, "R": {"x": 0.85, "y": 0.65}}},
+    {"gate": "Gate 2", "lane": 2, "station_m": 10, "line": {"L": {"x": 0.15, "y": 0.70}, "R": {"x": 0.85, "y": 0.70}}},
+    {"gate": "Gate 3", "lane": 2, "station_m": 20, "line": {"L": {"x": 0.15, "y": 0.75}, "R": {"x": 0.85, "y": 0.75}}},
+    {"gate": "Gate 4", "lane": 2, "station_m": 30, "line": {"L": {"x": 0.15, "y": 0.80}, "R": {"x": 0.85, "y": 0.80}}},
+    {"gate": "Gate 5", "lane": 2, "station_m": 40, "line": {"L": {"x": 0.15, "y": 0.85}, "R": {"x": 0.85, "y": 0.85}}}
   ]
 }
 ```
 
-後端驗證至少三條 Gate、`lane ≥ 1`、座標介於 0～1，且 `station_m` 依順序遞增。該 JSON 屬執行時校正資料，請勿將不同影像來源的座標直接共用。後端會讀取已存的停止線；目前網頁**不會自動回填既有 Gate**，重新開啟頁面仍需完成畫線流程。
+後端目前仍只驗證至少三條 Gate、`lane ≥ 1`、座標介於 0～1，且 `station_m` 依順序遞增；前端另要求五條一般 Gate。該 JSON 屬執行時校正資料，請勿將不同影像來源的座標直接共用。
+
+「匯出校正 JSON」會另外下載**版本 3** 的 `gate_geometry.json`，儲存停止線、原始影像尺寸、車道數、左右邊界，以及各 Gate 的錨點、影像像素角度與 `station_m`；Gate 的 L/R 由前端重新計算，不存於此檔。可用「匯入校正 JSON」載回同尺寸影片的校正，仍須人工確認是同一個場景。**本次沒有修改 `python/main.py`**，所以 `/save_points` 寫出的版本 2 檔案只保留線段，不會保留錨點、角度與邊界；要保存完整可編輯資料，請使用前端匯出按鈕。網頁目前也不會自動回填後端既有 Gate。
 
 ## 技術原理
 
