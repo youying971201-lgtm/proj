@@ -3,7 +3,6 @@ import json
 import math
 import os
 import signal
-import time
 from pathlib import Path
 from threading import Condition, Lock, Thread
 from time import perf_counter
@@ -108,6 +107,12 @@ class FrameBroadcaster:
     def finish(self):
         with self._condition:
             self._finished = True
+            self._condition.notify_all()
+
+    def reset(self):
+        with self._condition:
+            self._finished = False
+            self._sequence += 1
             self._condition.notify_all()
 
     def latest_frame(self):
@@ -1087,36 +1092,39 @@ async def save_points(request: Request):
 
 @app.post("/start_processing")
 def start_processing():
-    if len(getattr(app.state, "gates", [])) < 3:
-        raise HTTPException(status_code=422, detail="請先儲存至少三個 Gate")
-    if getattr(app.state, "processing_started", False):
-        raise HTTPException(status_code=409, detail="判斷已經開始")
-    app.state.processing_started = True
-    Thread(target=app.state.monitor_worker, daemon=True).start()
+    with line_lock:
+        if len(getattr(app.state, "gates", [])) < 3:
+            raise HTTPException(status_code=422, detail="請先儲存至少三個 Gate")
+        if getattr(app.state, "processing_started", False):
+            raise HTTPException(status_code=409, detail="判斷已經開始")
+        app.state.processing_started = True
+        app.state.cancel_requested = False
+        frame_broadcaster.reset()
+        thread = Thread(target=app.state.monitor_worker, daemon=True)
+        app.state.monitor_thread = thread
+        thread.start()
     return {"status": "started"}
 
 @app.post("/api/reset")
 def reset_processing():
-    if getattr(app.state, "processing_started", False):
-        app.state.cancel_requested = True
-        # 等待背景迴圈確實中斷並把 processing_started 改為 False
-        while getattr(app.state, "processing_started", False):
-            time.sleep(0.1)
-    
-    # 狀態重置，準備下一次啟動
-    app.state.cancel_requested = False
     with line_lock:
+        thread = getattr(app.state, "monitor_thread", None)
+        if getattr(app.state, "processing_started", False):
+            app.state.cancel_requested = True
+    # 等待整個工作執行緒（包含 finally）結束，才讓新一輪判斷開始。
+    if thread is not None and thread.is_alive():
+        thread.join()
+    with line_lock:
+        app.state.cancel_requested = False
+        app.state.monitor_thread = None
         if getattr(app.state, "road_marking_reload_requested", False):
             app.state.road_marking_reload_requested = False
             road_marking_status.update(
                 state="error",
                 message="Reload LaneNet 已取消；保留上次標線",
             )
-    frame_broadcaster._finished = False
-    with frame_broadcaster._condition:
-        frame_broadcaster._sequence += 1
-        frame_broadcaster._condition.notify_all()
-    
+    frame_broadcaster.reset()
+
     return {"status": "success", "message": "後端已重置"}
 
 
