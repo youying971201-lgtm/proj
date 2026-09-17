@@ -1,7 +1,11 @@
-"""以車輛接地點跨越 Gate 的時間估算區間均速。"""
+"""用 Gate 校正的道路位置估算即時速度與跨 Gate 區間均速。"""
 
+from collections import deque
 from dataclasses import dataclass, field
 from math import hypot, isfinite
+
+import cv2
+import numpy as np
 
 
 Point = tuple[float, float]
@@ -24,6 +28,15 @@ class SpeedEstimate:
     from_gate: str
     to_gate: str
     lane_adjusted: bool
+    method: str = "gate"
+
+
+@dataclass(frozen=True)
+class StationSection:
+    first: Gate
+    second: Gate
+    transform: np.ndarray
+    gate_pair_index: int
 
 
 @dataclass
@@ -34,6 +47,8 @@ class TrackState:
     last_crossing: tuple[int, float, float] | None = None
     crossed_gates: set[int] = field(default_factory=set)
     latest: SpeedEstimate | None = None
+    local_samples: deque[tuple[float, float, float]] = field(default_factory=deque)
+    local_latest: SpeedEstimate | None = None
 
 
 def _cross(a: Point, b: Point) -> float:
@@ -116,6 +131,7 @@ class GateSpeedEstimator:
         road_boundaries: dict | None = None,
         max_track_gap_frames: int = 5,
         max_track_gap_seconds: float = 2.0,
+        stop_line: tuple[Point, Point] | None = None,
     ) -> None:
         width, height = frame_size
         self.gates = [
@@ -147,6 +163,169 @@ class GateSpeedEstimator:
                 for side in ("L", "R")
             }
         self.pair_paths = [self._pair_samples(i) for i in range(len(self.gates) - 1)]
+        self.station_sections = [
+            section
+            for index in range(len(self.gates) - 1)
+            if (section := self._make_section(
+                self.gates[index], self.gates[index + 1], index
+            )) is not None
+        ]
+        self._include_stop_line(stop_line)
+
+    @staticmethod
+    def _make_section(first: Gate, second: Gate, pair_index: int) -> StationSection | None:
+        corners = np.float32([first.left, first.right, second.right, second.left])
+        if abs(cv2.contourArea(corners)) < 2:
+            return None
+        source = np.float32([first.left, first.right, second.left, second.right])
+        target = np.float32([
+            [0, first.station_m], [1, first.station_m],
+            [0, second.station_m], [1, second.station_m],
+        ])
+        transform = cv2.getPerspectiveTransform(source, target)
+        if not np.isfinite(transform).all() or np.linalg.matrix_rank(transform) < 3:
+            return None
+        return StationSection(first, second, transform, pair_index)
+
+    @staticmethod
+    def _project(section: StationSection, point: Point) -> tuple[float, float, float] | None:
+        x, y = point
+        matrix = section.transform
+        denominator = matrix[2, 0] * x + matrix[2, 1] * y + matrix[2, 2]
+        if abs(denominator) < 1e-9:
+            return None
+        across = (matrix[0, 0] * x + matrix[0, 1] * y + matrix[0, 2]) / denominator
+        station = (matrix[1, 0] * x + matrix[1, 1] * y + matrix[1, 2]) / denominator
+        span = section.second.station_m - section.first.station_m
+        if not isfinite(across) or not isfinite(station) or span <= 0:
+            return None
+        return station, across, (station - section.first.station_m) / span
+
+    def _include_stop_line(self, stop_line: tuple[Point, Point] | None) -> None:
+        if stop_line is None or not self.station_sections:
+            return
+        stop_midpoint = (
+            (stop_line[0][0] + stop_line[1][0]) / 2,
+            (stop_line[0][1] + stop_line[1][1]) / 2,
+        )
+        for section, prepend in (
+            (self.station_sections[0], True),
+            (self.station_sections[-1], False),
+        ):
+            projected = self._project(section, stop_midpoint)
+            if projected is None:
+                continue
+            station = projected[0]
+            span = section.second.station_m - section.first.station_m
+            if prepend and section.first.station_m - 5 * span < station < section.first.station_m - 0.5:
+                stop = Gate("Stop line", station, *stop_line)
+                extra = self._make_section(stop, section.first, section.gate_pair_index)
+                if extra is not None:
+                    self.station_sections.insert(0, extra)
+                return
+            if not prepend and section.second.station_m + 0.5 < station < section.second.station_m + 5 * span:
+                stop = Gate("Stop line", station, *stop_line)
+                extra = self._make_section(section.second, stop, section.gate_pair_index)
+                if extra is not None:
+                    self.station_sections.append(extra)
+                return
+
+    @staticmethod
+    def _extrapolate(section: StationSection, point: Point, before: bool) -> tuple[float, float] | None:
+        reference = section.first if before else section.second
+        other = section.second if before else section.first
+        gate_vector = _subtract(reference.right, reference.left)
+        gate_length = hypot(*gate_vector)
+        other_center = (
+            (other.left[0] + other.right[0]) / 2,
+            (other.left[1] + other.right[1]) / 2,
+        )
+        if gate_length < 2:
+            return None
+        denominator = _cross(gate_vector, _subtract(other_center, reference.left))
+        if abs(denominator) < gate_length * 2:
+            return None
+        fraction = _cross(gate_vector, _subtract(point, reference.left)) / denominator
+        station = reference.station_m + fraction * (other.station_m - reference.station_m)
+        across = (
+            _subtract(point, reference.left)[0] * gate_vector[0]
+            + _subtract(point, reference.left)[1] * gate_vector[1]
+        ) / (gate_length * gate_length)
+        return station, across
+
+    def road_position(self, point: Point) -> tuple[float, float, int] | None:
+        """將影像接地點映到局部道路里程，並保留車道橫向比例。"""
+        candidates = []
+        for section in self.station_sections:
+            projected = self._project(section, point)
+            if projected is None:
+                continue
+            station, across, fraction = projected
+            outside_station = max(0.0, -fraction, fraction - 1.0)
+            outside_lateral = max(0.0, -across, across - 1.0)
+            score = outside_station * 2 + outside_lateral
+            candidates.append((score, outside_station, section, station, across, fraction))
+        if not candidates:
+            return None
+        _, outside_station, section, station, across, fraction = min(
+            candidates, key=lambda item: item[0]
+        )
+        if outside_station > 0:
+            extrapolated = self._extrapolate(section, point, fraction < 0)
+            if extrapolated is None:
+                return None
+            station, across = extrapolated
+        return station, max(0.0, min(across, 1.0)), section.gate_pair_index
+
+    def _local_estimate(
+        self, track: TrackState, point: Point, timestamp_s: float
+    ) -> SpeedEstimate | None:
+        position = self.road_position(point)
+        if position is None:
+            return track.local_latest
+        station, across, _ = position
+        samples = track.local_samples
+        samples.append((timestamp_s, station, across))
+        while len(samples) > 2 and timestamp_s - samples[0][0] > 1.0:
+            samples.popleft()
+        duration = samples[-1][0] - samples[0][0]
+        if len(samples) < 2 or duration < 0.12:
+            return track.local_latest
+        mean_time = sum(item[0] for item in samples) / len(samples)
+        mean_station = sum(item[1] for item in samples) / len(samples)
+        mean_across = sum(item[2] for item in samples) / len(samples)
+        denominator = sum((time - mean_time) ** 2 for time, _, _ in samples)
+        if denominator <= 1e-9:
+            return track.local_latest
+        slope = sum(
+            (time - mean_time) * (distance - mean_station)
+            for time, distance, _ in samples
+        ) / denominator
+        pair_index = next(
+            (
+                index for index in range(len(self.gates) - 1)
+                if mean_station < self.gates[index + 1].station_m
+            ),
+            len(self.gates) - 2,
+        )
+        ratio = self.lane_distance_ratio(pair_index, mean_across)
+        speed_kmh = abs(slope) * (ratio if ratio is not None else 1.0) * 3.6
+        if not isfinite(speed_kmh) or speed_kmh > 250:
+            return track.local_latest
+        if speed_kmh < 1.5:
+            speed_kmh = 0.0
+        lane_number = min(int(across * self.lane_count), self.lane_count - 1) + 1
+        track.local_latest = SpeedEstimate(
+            kmh=speed_kmh,
+            distance_m=speed_kmh * duration / 3.6,
+            duration_s=duration,
+            lane_number=lane_number,
+            from_gate="",
+            to_gate="",
+            lane_adjusted=ratio is not None,
+            method="local",
+        )
+        return track.local_latest
 
     def _pair_samples(self, index: int) -> tuple[list[Point], list[Point]]:
         first, second = self.gates[index:index + 2]
@@ -203,6 +382,7 @@ class GateSpeedEstimator:
         previous = track.last_point
         previous_time = track.last_time
         previous_frame = track.last_frame
+        gate_estimate = None
         if previous is not None and previous_time is not None and previous_frame is not None:
             frame_gap = frame_number - previous_frame
             if (
@@ -214,6 +394,8 @@ class GateSpeedEstimator:
                 track.last_crossing = None
                 track.crossed_gates.clear()
                 track.latest = None
+                track.local_samples.clear()
+                track.local_latest = None
             else:
                 hits = []
                 min_x, max_x = sorted((previous[0], point[0]))
@@ -259,12 +441,14 @@ class GateSpeedEstimator:
                                     to_gate=self.gates[index].name,
                                     lane_adjusted=ratio is not None,
                                 )
+                                gate_estimate = track.latest
                     track.last_crossing = index, crossing_time, across
                     track.crossed_gates.add(index)
         track.last_point = (float(point[0]), float(point[1]))
         track.last_time = timestamp_s
         track.last_frame = frame_number
-        return track.latest
+        local_estimate = self._local_estimate(track, point, timestamp_s)
+        return gate_estimate or local_estimate or track.latest
 
     def remove(self, track_id: int) -> None:
         self.tracks.pop(int(track_id), None)

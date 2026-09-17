@@ -23,7 +23,7 @@ os.environ.setdefault("YOLO_CONFIG_DIR", str(_DEFAULT_YOLO_CONFIG_DIR))
 from ultralytics import YOLO
 
 from Car import Vehicle
-from gate_speed import GateSpeedEstimator
+from gate_speed import GateSpeedEstimator, segment_intersection
 from road_marking import RoadMarkingDetector, draw_road_markings
 from trafficLight import TrafficLightDetector
 from video_source import CAMERA_BACKENDS, list_available_cameras, open_video_capture
@@ -118,6 +118,66 @@ class FrameBroadcaster:
     def latest_frame(self):
         with self._condition:
             return self._frame
+
+
+class FallbackVehicleTracker:
+    """ByteTrack 暫無 ID 時，用相鄰影格的框延續短期車輛身分。"""
+
+    def __init__(self, max_gap_frames=5):
+        self.max_gap_frames = max_gap_frames
+        self.next_id = -1
+        self.tracks = {}
+
+    @staticmethod
+    def _match_score(previous, current):
+        x1 = max(previous[0], current[0])
+        y1 = max(previous[1], current[1])
+        x2 = min(previous[2], current[2])
+        y2 = min(previous[3], current[3])
+        overlap = max(0, x2 - x1) * max(0, y2 - y1)
+        first_area = max(0, previous[2] - previous[0]) * max(0, previous[3] - previous[1])
+        second_area = max(0, current[2] - current[0]) * max(0, current[3] - current[1])
+        union = first_area + second_area - overlap
+        iou = overlap / union if union > 0 else 0.0
+        first_center = ((previous[0] + previous[2]) / 2, previous[3])
+        second_center = ((current[0] + current[2]) / 2, current[3])
+        distance = math.hypot(
+            first_center[0] - second_center[0],
+            first_center[1] - second_center[1],
+        )
+        scale = max(
+            previous[2] - previous[0], previous[3] - previous[1],
+            current[2] - current[0], current[3] - current[1], 1,
+        )
+        if iou < 0.1 and distance > 0.6 * scale:
+            return None
+        return iou - 0.2 * distance / scale
+
+    def assign(self, boxes, frame_number):
+        self.tracks = {
+            track_id: (box, seen)
+            for track_id, (box, seen) in self.tracks.items()
+            if frame_number - seen <= self.max_gap_frames
+        }
+        used = set()
+        assigned = []
+        for box in boxes:
+            best = None
+            for track_id, (previous, _) in self.tracks.items():
+                if track_id in used:
+                    continue
+                score = self._match_score(previous, box)
+                if score is not None and (best is None or score > best[0]):
+                    best = score, track_id
+            if best is None:
+                track_id = self.next_id
+                self.next_id -= 1
+            else:
+                track_id = best[1]
+            used.add(track_id)
+            self.tracks[track_id] = (tuple(box), frame_number)
+            assigned.append(track_id)
+        return assigned
 
 
 frame_broadcaster = FrameBroadcaster()
@@ -275,31 +335,25 @@ def get_line_side(point, line_start, line_end):
         return 0
     return 1 if signed_distance > 0 else -1
 
-#確認車輛中心投影落在線段範圍內，避免在延伸線上被錯誤計數。
-def point_is_within_line_span(point, line_start, line_end):
-    px, py = point
-    x1, y1 = line_start
-    x2, y2 = line_end
-    dx, dy = x2 - x1, y2 - y1
-    length_squared = max(dx * dx + dy * dy, 1)
-    projection = ((px - x1) * dx + (py - y1) * dy) / length_squared
-    return 0.0 <= projection <= 1.0
-
 def detect_crossing(vehicle, center, config):
-    """依車輛中心跨越線段前後的側別判斷 IN／OUT，並以防抖區避免重複觸發。"""
+    """用接地點軌跡與有限停止線相交來判斷 IN／OUT。"""
     line_start, line_end = config["line"]
     current_side = get_line_side(center, line_start, line_end)
     if current_side == 0:
         return None
     if vehicle.line_side is None:
         vehicle.line_side = current_side
+        vehicle.line_side_point = center
         return None
     if current_side == vehicle.line_side:
+        vehicle.line_side_point = center
         return None
 
     previous_side = vehicle.line_side
+    previous_point = vehicle.line_side_point or vehicle.last_center
     vehicle.line_side = current_side
-    if not point_is_within_line_span(center, line_start, line_end):
+    vehicle.line_side_point = center
+    if segment_intersection(previous_point, center, line_start, line_end) is None:
         return None
     transition = (previous_side, current_side)
     return "IN" if transition == config["in_transition"] else "OUT"
@@ -578,9 +632,13 @@ def run_monitor(
     line_start, line_end = video_config["line"]
     print(f"Counting line for {source_name}: start={line_start}, end={line_end}")
     light_detector = TrafficLightDetector()
-    speed_estimator = GateSpeedEstimator(speed_gates, (width, height), speed_boundaries)
+    speed_estimator = GateSpeedEstimator(
+        speed_gates, (width, height), speed_boundaries,
+        stop_line=video_config["line"],
+    )
 
     vehicles = {}
+    fallback_tracker = FallbackVehicleTracker()
     total_vehicle_ids = set()
     illegal_vehicle_ids = set()
     direction_counts = {"IN": 0, "OUT": 0}
@@ -728,103 +786,112 @@ def run_monitor(
             )
             previous_light_state = traffic_light_state
 
+        vehicle_indices = [
+            index for index, class_id in enumerate(classes)
+            if class_id in VEHICLE_CLASSES
+        ]
+        vehicle_boxes = [boxes[index] for index in vehicle_indices]
         if result.boxes.id is not None:
-            ids = result.boxes.id.cpu().numpy().astype(int)
+            all_ids = result.boxes.id.cpu().numpy().astype(int)
+            vehicle_ids = [int(all_ids[index]) for index in vehicle_indices]
+        else:
+            vehicle_ids = [-1] * len(vehicle_boxes)
+        missing_indices = [
+            index for index, track_id in enumerate(vehicle_ids) if track_id < 0
+        ]
+        temporary_ids = fallback_tracker.assign(
+            [vehicle_boxes[index] for index in missing_indices], frame_count
+        )
+        for index, temporary_id in zip(missing_indices, temporary_ids):
+            vehicle_ids[index] = temporary_id
 
-            vehicle_boxes = []
-            vehicle_ids = []
+        for box, track_id in zip(vehicle_boxes, vehicle_ids):
+            x1, y1, x2, y2 = box
+            center = ((x1 + x2) // 2, y2)
+            has_tracker_id = track_id >= 0
+            if has_tracker_id:
+                total_vehicle_ids.add(track_id)
+            if track_id not in vehicles:
+                vehicles[track_id] = Vehicle(
+                    track_id=track_id,
+                    last_center=center,
+                    first_seen_frame=frame_count,
+                    last_seen_frame=frame_count,
+                )
+            vehicle = vehicles[track_id]
 
-            for box, track_id, class_id in zip(boxes, ids, classes):
-                if class_id not in VEHICLE_CLASSES:
-                    continue
-                x1, y1, x2, y2 = box
-                center = ((x1 + x2) // 2, y2)
-                vehicle_boxes.append(box)
-                vehicle_ids.append(track_id)
-                total_vehicle_ids.add(int(track_id))
-
-                if track_id not in vehicles:
-                    vehicles[track_id] = Vehicle(
-                        track_id=track_id,
-                        last_center=center,
-                        first_seen_frame=frame_count,
-                        last_seen_frame=frame_count,
+            if has_tracker_id:
+                direction = detect_crossing(vehicle, center, video_config)
+                if direction == "IN" and vehicle.crossed_in:
+                    direction = None
+                elif direction == "OUT" and vehicle.crossed_out:
+                    direction = None
+                if direction:
+                    is_new_violation = vehicle.mark_crossing(
+                        direction, traffic_light_state
                     )
-
-            if vehicle_boxes:
-                for index, track_id in enumerate(vehicle_ids):
-                    vehicle = vehicles[track_id]
-                    x1, y1, x2, y2 = vehicle_boxes[index]
-                    center = ((x1 + x2) // 2, y2)
-                    direction = detect_crossing(vehicle, center, video_config)
-                    if direction == "IN" and vehicle.crossed_in:
-                        direction = None
-                    elif direction == "OUT" and vehicle.crossed_out:
-                        direction = None
-
-                    if direction:
-                        is_new_violation = vehicle.mark_crossing(
-                            direction, traffic_light_state
-                        )
-                        direction_counts[direction] += 1
-                        print(
-                            f"Frame {frame_count}: vehicle {track_id} crossed "
-                            f"{direction}, light={traffic_light_state}"
-                        )
-                        if is_new_violation:
-                            illegal_vehicle_ids.add(int(track_id))
-                            print(f"  -> violation: vehicle {track_id}")
-
-                    color = (0, 0, 255) if vehicle.illegal else (0, 255, 0)
-                    label = "ILLEGAL" if vehicle.illegal else "OK"
-                    vehicle.update_position(
-                        center,
-                        frame_count,
-                        MOTION_STOP_THRESHOLD,
-                        MOTION_MOVING_THRESHOLD,
-                        MOTION_CONFIRM_FRAMES,
-                        MOTION_SMOOTHING_ALPHA,
-                        camera_transform,
+                    direction_counts[direction] += 1
+                    print(
+                        f"Frame {frame_count}: vehicle {track_id} crossed "
+                        f"{direction}, light={traffic_light_state}"
                     )
-                    speed_estimate = speed_estimator.update(
-                        int(track_id), center, frame_timestamp, frame_count
-                    )
-                    if vehicle.motion_state == "STOPPED":
-                        color = (255,0,0)
-                    else:
-                        color = (0,255,0)
-                    cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-                    cv2.circle(frame, center, 5, (255, 0, 0), -1)
-                    cross_info = vehicle.cross_direction or ""
-                    speed_y = max(y1 - 10, 22)
-                    label_y = max(speed_y - 20, 18) if speed_estimate else speed_y
-                    cv2.putText(
-                        frame,
-                        f"ID:{track_id} {label} {vehicle.motion_state} {cross_info}",
-                        (x1, label_y),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.5,
-                        color,
-                        1,
-                    )
-                    if speed_estimate is not None:
-                        estimate_source = "" if speed_estimate.lane_adjusted else " base"
-                        cv2.putText(
-                            frame,
-                            f"EST AVG {speed_estimate.kmh:.1f} km/h "
-                            f"(L{speed_estimate.lane_number}{estimate_source})",
-                            (x1, speed_y),
-                            cv2.FONT_HERSHEY_SIMPLEX,
-                            0.5,
-                            (0, 255, 255),
-                            1,
-                        )
+                    if is_new_violation:
+                        illegal_vehicle_ids.add(track_id)
+                        print(f"  -> violation: vehicle {track_id}")
+
+            vehicle.update_position(
+                center,
+                frame_count,
+                MOTION_STOP_THRESHOLD,
+                MOTION_MOVING_THRESHOLD,
+                MOTION_CONFIRM_FRAMES,
+                MOTION_SMOOTHING_ALPHA,
+                camera_transform,
+            )
+            speed_estimate = speed_estimator.update(
+                track_id, center, frame_timestamp, frame_count
+            )
+            color = (
+                (0, 0, 255) if vehicle.illegal else
+                (255, 0, 0) if vehicle.motion_state == "STOPPED" else
+                (0, 255, 0)
+            )
+            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+            cv2.circle(frame, center, 5, (255, 0, 0), -1)
+            speed_y = max(y1 - 10, 22)
+            label_y = max(speed_y - 20, 18)
+            if has_tracker_id:
+                label = "ILLEGAL" if vehicle.illegal else "OK"
+                identity = f"ID:{track_id} {label}"
+            else:
+                identity = f"TEMP:{-track_id}"
+            cv2.putText(
+                frame,
+                f"{identity} {vehicle.motion_state} {vehicle.cross_direction or ''}",
+                (x1, label_y),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1,
+            )
+            if speed_estimate is None:
+                speed_label = "EST -- km/h"
+            else:
+                estimate_source = "" if speed_estimate.lane_adjusted else " base"
+                estimate_kind = "AVG" if speed_estimate.method == "gate" else "LIVE"
+                speed_label = (
+                    f"EST {estimate_kind} {speed_estimate.kmh:.1f} km/h "
+                    f"(L{speed_estimate.lane_number}{estimate_source})"
+                )
+            cv2.putText(
+                frame, speed_label, (x1, speed_y),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1,
+            )
 
         # 只移除確實消失一段時間的追蹤目標，避免仍在畫面中的車輛遺失狀態。
         stale_ids = [
             track_id
             for track_id, vehicle in vehicles.items()
-            if frame_count - vehicle.last_seen_frame > TRACK_TTL_FRAMES
+            if frame_count - vehicle.last_seen_frame > (
+                5 if track_id < 0 else TRACK_TTL_FRAMES
+            )
         ]
         for track_id in stale_ids:
             del vehicles[track_id]

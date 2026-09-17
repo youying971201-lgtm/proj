@@ -20,6 +20,7 @@ class Vehicle:
     cross_direction: Optional[str] = None
     # 車輛最後一次明確位於計數線的哪一側：-1、1；在線附近時維持原值。
     line_side: Optional[int] = None
+    line_side_point: Optional[Point] = None
     # 車輛移動狀態。剛被追蹤時資料不足，因此先顯示 CHECKING。
     motion_state: str = "CHECKING"
     smoothed_speed: float = 0.0
