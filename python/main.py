@@ -808,9 +808,11 @@ def run_monitor(
                         1,
                     )
                     if speed_estimate is not None:
+                        estimate_source = "" if speed_estimate.lane_adjusted else " base"
                         cv2.putText(
                             frame,
-                            f"EST AVG {speed_estimate.kmh:.1f} km/h (Lane {speed_estimate.lane_number})",
+                            f"EST AVG {speed_estimate.kmh:.1f} km/h "
+                            f"(L{speed_estimate.lane_number}{estimate_source})",
                             (x1, speed_y),
                             cv2.FONT_HERSHEY_SIMPLEX,
                             0.5,

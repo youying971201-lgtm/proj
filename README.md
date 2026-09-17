@@ -150,7 +150,7 @@ YOLO11 偵測 COCO 類別中的汽車、機車、公車、卡車與交通號誌�
 
 目前 `python/gate_speed.py` 以 YOLO 框的**底部中心點**作為接地點。同一追蹤 ID 在相鄰影格的接地點形成移動線段；線段穿越有限 Gate 時，在兩個影格時間之間插值通過時間。影片優先使用 OpenCV 提供且單調遞增的時間戳，不可用時以影格序號／FPS 回退；攝影機使用擷取後的單調時鐘。跨越相鄰兩條 Gate 後，計算 `預估區間均速 = Gate 距離 ÷ 通過時間差 × 3.6`，並將最近一次結果標在車輛框上方。追蹤長時間中斷、車道切換、異常時間或不合理速度會跳過估算。
 
-彎道的 Lane Differential 暫以左右道路邊界在兩 Gate 間的**像素弧長**建立內外側路徑，再依車輛通過 Gate 的橫向位置內插；該路徑長度與道路中央像素路徑長度之比，用於修正 10／4／6 公尺的預設距離。若邊界資料不可用，則退回兩 Gate 端點之間的直線像素比例。這是影像上的近似方法：透視會改變像素尺度，邊界錨點、車輛框底部、鏡頭晃動及 FPS 都會造成誤差。更精準的下一步是用已量測的道路平面對應點建立 [homography](https://docs.opencv.org/4.2.0/d7/dff/tutorial_feature_homography.html)，將車輛接地軌跡映射到公尺座標後按各車道曲線弧長計算；[ICCV 2021 的單眼測速研究](https://openaccess.thecvf.com/content/ICCV2021/papers/Revaud_Robust_Automatic_Monocular_Vehicle_Speed_Estimation_for_Traffic_Surveillance_ICCV_2021_paper.pdf)也採道路平面校正來估計實際位移。最後仍須與實測車速比對。目前**未做道路平面透視校正或現地車速驗證**，請勿用 `EST` 數字判定違規。
+彎道的 Lane Differential 暫以左右道路邊界在兩 Gate 間的**像素弧長**建立內外側路徑，再依車輛通過 Gate 的橫向位置內插；該路徑長度與道路中央像素路徑長度之比，用於修正 10／4／6 公尺的預設距離。若邊界資料不可用，則退回兩 Gate 端點之間的直線像素比例。透視可能使這個比例嚴重失真；超出 0.75～1.25 或無法計算時，改用未經車道差修正的 Gate 預設距離估速，車框文字會標示 `base`。這是影像上的近似方法：透視會改變像素尺度，邊界錨點、車輛框底部、鏡頭晃動及 FPS 都會造成誤差。更精準的下一步是用已量測的道路平面對應點建立 [homography](https://docs.opencv.org/4.2.0/d7/dff/tutorial_feature_homography.html)，將車輛接地軌跡映射到公尺座標後按各車道曲線弧長計算；[ICCV 2021 的單眼測速研究](https://openaccess.thecvf.com/content/ICCV2021/papers/Revaud_Robust_Automatic_Monocular_Vehicle_Speed_Estimation_for_Traffic_Surveillance_ICCV_2021_paper.pdf)也採道路平面校正來估計實際位移。最後仍須與實測車速比對。目前**未做道路平面透視校正或現地車速驗證**，請勿用 `EST` 數字判定違規。
 
 ## 模型與資料來源
 

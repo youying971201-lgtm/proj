@@ -23,6 +23,7 @@ class SpeedEstimate:
     lane_number: int
     from_gate: str
     to_gate: str
+    lane_adjusted: bool
 
 
 @dataclass
@@ -190,7 +191,7 @@ class GateSpeedEstimator:
         if middle_length < 2:
             return None
         ratio = length_at(across) / middle_length
-        # 過大的比例通常是邊界、Gate 或視角校正錯誤；不要顯示看似可信的數字。
+        # 過大的比例通常是透視或校正誤差；不要使用失真的車道差修正。
         return ratio if isfinite(ratio) and 0.75 <= ratio <= 1.25 else None
 
     def update(
@@ -237,8 +238,16 @@ class GateSpeedEstimator:
                         lane_after = min(int(across * self.lane_count), self.lane_count - 1)
                         pair_index = min(previous_index, index)
                         ratio = self.lane_distance_ratio(pair_index, (previous_across + across) / 2)
-                        if lane_before == lane_after and ratio is not None and duration >= 0.05:
-                            distance = abs(self.gates[index].station_m - self.gates[previous_index].station_m) * ratio
+                        if lane_before == lane_after and duration >= 0.05:
+                            # 透視可能把邊界像素弧長放大數倍；修正值不可信時
+                            # 仍以操作員校正的 Gate 距離估速，避免整段沒有讀數。
+                            station_distance = abs(
+                                self.gates[index].station_m
+                                - self.gates[previous_index].station_m
+                            )
+                            distance = station_distance * (
+                                ratio if ratio is not None else 1.0
+                            )
                             speed_kmh = distance / duration * 3.6
                             if 0.5 <= speed_kmh <= 250:
                                 track.latest = SpeedEstimate(
@@ -248,6 +257,7 @@ class GateSpeedEstimator:
                                     lane_number=lane_after + 1,
                                     from_gate=self.gates[previous_index].name,
                                     to_gate=self.gates[index].name,
+                                    lane_adjusted=ratio is not None,
                                 )
                     track.last_crossing = index, crossing_time, across
                     track.crossed_gates.add(index)

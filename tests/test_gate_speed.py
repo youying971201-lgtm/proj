@@ -40,6 +40,7 @@ class GateSpeedTests(unittest.TestCase):
         self.assertAlmostEqual(estimate.duration_s, 0.8)
         self.assertAlmostEqual(estimate.distance_m, 10.0)
         self.assertAlmostEqual(estimate.kmh, 45.0)
+        self.assertTrue(estimate.lane_adjusted)
         self.assertEqual((estimate.from_gate, estimate.to_gate), ("Gate 1", "Gate 2"))
 
     def test_finite_gate_rejects_crossing_outside_span(self):
@@ -61,6 +62,32 @@ class GateSpeedTests(unittest.TestCase):
         self.assertIsNotNone(inner)
         self.assertIsNotNone(outer)
         self.assertGreater(outer, inner)
+
+    def test_perspective_distortion_falls_back_to_base_gate_distance(self):
+        estimator = GateSpeedEstimator([
+            gate("Gate 1", 0, (100, 200), (900, 200)),
+            gate("Gate 2", 10, (300, 180), (700, 180)),
+        ], (WIDTH, HEIGHT), {
+            "L": [point(100, 200), point(300, 180)],
+            "R": [point(900, 200), point(700, 180)],
+        })
+        self.assertIsNone(estimator.lane_distance_ratio(0, 0.75))
+
+        first = (700, 200)
+        second = (600, 180)
+        estimate = None
+        for frame, (fraction, timestamp) in enumerate(
+            [(-0.25, 0.0), (0.25, 0.2), (0.75, 0.6), (1.25, 0.8)], 1
+        ):
+            position = tuple(
+                a + (b - a) * fraction for a, b in zip(first, second)
+            )
+            estimate = estimator.update(7, position, timestamp, frame)
+
+        self.assertIsNotNone(estimate)
+        self.assertFalse(estimate.lane_adjusted)
+        self.assertAlmostEqual(estimate.distance_m, 10.0)
+        self.assertAlmostEqual(estimate.kmh, 60.0)
 
     def test_lane_change_does_not_report_speed(self):
         estimator = GateSpeedEstimator([

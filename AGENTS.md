@@ -16,7 +16,7 @@
 - YOLO11（目前預設 `yolo11x.pt`，可指定其他權重）與 ByteTrack 偵測、追蹤車輛；現有號誌顏色、停止線越線、`IN`／`OUT` 計數與 `ILLEGAL` 提示。號誌偵測不依賴追蹤 ID；`MOVING`／`STOPPED` 是影像位移分類，並非實際速度。
 - `python/road_marking.py` 使用團隊訓練的 Stage-5 SegFormer checkpoint。按下 **Reload LaneNet** 後，服務才對下一張影格推論一次，釋放模型並快取標線結果供後續畫面顯示；類別色彩遮罩與折線像素座標也隨結果快取，避免每幀重建。目前不是逐幀分割。API 為 `POST /api/reload_lanenet`、`GET /api/road_markings`。
 - `cord_data/points_data.json` 是操作員產生的執行時校正資料。新版前端傳版本 3 JSON，後端保留停止線、Gate L/R、道路邊界、Gate 錨點與影像像素角度；舊版只傳 L/R 時仍使用版本 2。前端另可匯出／匯入版本 3 的 `gate_geometry.json`。Gate 的 `lane` 是固定道路車道數；前端暫以 Gate 1 = 0 m、每個一般 Gate 間隔 10 m、選配 `.4` Gate 相對前一一般 Gate 加 4 m 填入 `station_m`。
-- `python/gate_speed.py` 以同一車輛接地點的有限 Gate 穿越時間計算預估區間均速，依左右道路邊界的像素路徑長度比近似修正彎道內外車道差；`python/main.py` 將 `EST AVG ... km/h` 顯示於車輛框上方。距離未經現地測量，未做透視校正及實測車速驗證，不得描述為精確或執法測速。
+- `python/gate_speed.py` 以同一車輛接地點的有限 Gate 穿越時間計算預估區間均速，依左右道路邊界的像素路徑長度比近似修正彎道內外車道差；像素比例失真時改以未修正的 Gate 距離估算並標記 `base`。`python/main.py` 將 `EST AVG ... km/h` 顯示於車輛框上方。距離未經現地測量，未做透視校正及實測車速驗證，不得描述為精確或執法測速。
 - 違規變道（跨越實線、未打方向燈）及雲端多鏡頭監看仍屬規劃，不能寫成已完成或已驗證的功能。
 
 ## 專案結構
@@ -53,7 +53,7 @@ py -3.12 -m unittest discover -s tests -v
 
 服務啟動後開啟 `http://127.0.0.1:8000`。需要 CPU 推論時用 `--device cpu`；`--device auto` 依序選擇 CUDA、MPS、CPU，明確指定但不可用的加速裝置會退回 CPU；Stage-5 在 YOLO 選到 MPS 時仍使用 CPU。切換 YOLO 權重用 `--model`。功能變更時，除相關單元測試外，還要以適用的影片或攝影機檢查受影響的 API／網頁流程。跨平台行為變更應在 Windows、macOS 各驗證一次，無法驗證的平台要在交付說明中標明。
 
-2026-09-17 的 Gate、效能、號誌、裝置選擇與重新判斷修正已在 macOS 以 `python3.12 -m unittest discover -s tests -v` 通過 22 項測試（含合成影格的車框上方速度文字、無追蹤 ID 時更新號誌、加速裝置回退及重置等待工作執行緒測試），`python3.12 -m compileall -q python` 通過；前端另以本機 JavaScriptCore 模擬停止線、邊界、Gate、Enter、JSON 匯入與匯出邏輯。`start.command` 已通過 zsh 語法檢查及 `./start.command --help` 啟動檢查。合成 1280×720 標線疊圖測試由約 7.5 ms／幀降為 4.6 ms／幀，不代表完整流程 FPS。專案內目前無可用測試影片，尚未完成真實影片速度對照或 Windows 實測。
+2026-09-18 的 Gate 測速回退修正已在 macOS 以 `python3.12 -m unittest discover -s tests -v` 通過 23 項測試（含透視造成像素比例失真時仍可估速的回歸測試），`python3.12 -m compileall -q python` 通過。2026-09-17 的前端另以本機 JavaScriptCore 模擬停止線、邊界、Gate、Enter、JSON 匯入與匯出邏輯；`start.command` 通過 zsh 語法及 `./start.command --help` 檢查。合成 1280×720 標線疊圖測試由約 7.5 ms／幀降為 4.6 ms／幀，不代表完整流程 FPS。專案內目前無可用測試影片，尚未完成真實影片速度對照或 Windows 實測。
 
 ## 未完成目標與實現辦法
 
