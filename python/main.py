@@ -1,5 +1,6 @@
 import argparse
 import json
+import math
 import os
 from pathlib import Path
 from threading import Condition, Lock, Thread
@@ -21,6 +22,7 @@ os.environ.setdefault("YOLO_CONFIG_DIR", str(_DEFAULT_YOLO_CONFIG_DIR))
 from ultralytics import YOLO
 
 from Car import Vehicle
+from gate_speed import GateSpeedEstimator
 from road_marking import RoadMarkingDetector, draw_road_markings
 from trafficLight import TrafficLightDetector
 from video_source import CAMERA_BACKENDS, list_available_cameras, open_video_capture
@@ -308,7 +310,7 @@ def detect_crossing(vehicle, center, config):
     return "IN" if transition == config["in_transition"] else "OUT"
 
 
-def load_saved_line(default_line):
+def load_saved_line(default_line, frame_size):
     """讀取網頁上一次儲存的兩點；檔案不存在或格式錯誤時使用預設值。"""
     if not POINTS_FILE.exists():
         return default_line
@@ -322,7 +324,14 @@ def load_saved_line(default_line):
             points = saved["points"]
         if len(points) != 2:
             raise ValueError("停止線必須剛好有兩個端點")
-        return tuple((int(point["x"]), int(point["y"])) for point in points)
+        width, height = frame_size
+        normalized = saved.get("video", {}).get("coordinate_system") == "normalized_0_to_1"
+        if normalized:
+            return tuple((
+                round(float(point["x"]) * (width - 1)),
+                round(float(point["y"]) * (height - 1)),
+            ) for point in points)
+        return tuple((round(float(point["x"])), round(float(point["y"]))) for point in points)
     except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as error:
         print(f"無法讀取 {POINTS_FILE}，改用預設計數線：{error}")
         return default_line
@@ -354,12 +363,13 @@ def prepare_configuration_frame(
         return
     height, width = frame.shape[:2]
     config = get_video_config(source_name, width, height)
-    stop_line = load_saved_line(config["line"])
+    stop_line = load_saved_line(config["line"], (width, height))
     with line_lock:
         app.state.frame_size = (width, height)
         app.state.video_config = {**config, "line": stop_line}
         app.state.stop_line = [{"x": x, "y": y} for x, y in stop_line]
         app.state.gates = []
+        app.state.road_boundaries = None
     frame_broadcaster.publish(frame)
     set_runtime_status("configuring", "請標示停止線與至少三個 Gate，再按開始判斷")
 
@@ -564,11 +574,14 @@ def run_monitor(
             (round(point["x"] * (width - 1)), round(point["y"] * (height - 1)))
             for point in app.state.stop_line
         )
+        speed_gates = [dict(gate) for gate in app.state.gates]
+        speed_boundaries = getattr(app.state, "road_boundaries", None)
     line_start, line_end = video_config["line"]
     playback_speed = video_config["playback_speed"]
     print(f"Counting line for {source_name}: start={line_start}, end={line_end}")
     print(f"Playback speed: {playback_speed:.0%}")
     light_detector = TrafficLightDetector()
+    speed_estimator = GateSpeedEstimator(speed_gates, (width, height), speed_boundaries)
 
     vehicles = {}
     total_vehicle_ids = set()
@@ -583,6 +596,7 @@ def run_monitor(
     green_ratio = 0.0
     previous_light_state = "UNKNOWN"
     previous_time = perf_counter()
+    last_video_timestamp = None
     smoothed_fps = 0.0
     previous_gray = None
     camera_motion = 0.0
@@ -609,7 +623,6 @@ def run_monitor(
     while cap.isOpened():
         if getattr(app.state, "cancel_requested", False):
             break
-        frame_started_at = perf_counter()
         # 結束時間採不包含上限的區間，例如 5~10 秒不會處理第 10 秒的影格。
         if (
             not is_live_source
@@ -625,6 +638,21 @@ def run_monitor(
                 continue
             break
         frame_count += 1
+        if is_live_source:
+            frame_timestamp = perf_counter()
+        else:
+            capture_timestamp = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
+            fallback_timestamp = frame_count / fps
+            frame_timestamp = (
+                capture_timestamp
+                if math.isfinite(capture_timestamp)
+                and capture_timestamp > 0
+                and (last_video_timestamp is None or capture_timestamp > last_video_timestamp)
+                else fallback_timestamp
+            )
+            if last_video_timestamp is not None and frame_timestamp <= last_video_timestamp:
+                frame_timestamp = last_video_timestamp + 1.0 / fps
+            last_video_timestamp = frame_timestamp
 
         current_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         (
@@ -663,6 +691,15 @@ def run_monitor(
                 frame,
                 latest_road_result,
                 opacity=road_marking_opacity,
+            )
+
+        for gate in speed_estimator.gates:
+            left = tuple(round(value) for value in gate.left)
+            right = tuple(round(value) for value in gate.right)
+            cv2.line(frame, left, right, (255, 220, 0), 1)
+            cv2.putText(
+                frame, gate.name, (left[0] + 3, max(left[1] - 4, 12)),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 220, 0), 1,
             )
 
         if result.boxes.id is not None:
@@ -764,6 +801,9 @@ def run_monitor(
                         MOTION_SMOOTHING_ALPHA,
                         camera_transform,
                     )
+                    speed_estimate = speed_estimator.update(
+                        int(track_id), center, frame_timestamp, frame_count
+                    )
                     if vehicle.motion_state == "STOPPED":
                         color = (255,0,0)
                     else:
@@ -771,15 +811,27 @@ def run_monitor(
                     cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
                     cv2.circle(frame, center, 5, (255, 0, 0), -1)
                     cross_info = vehicle.cross_direction or ""
+                    speed_y = max(y1 - 10, 22)
+                    label_y = max(speed_y - 20, 18) if speed_estimate else speed_y
                     cv2.putText(
                         frame,
                         f"ID:{track_id} {label} {vehicle.motion_state} {cross_info}",
-                        (x1, max(y1 - 10, 20)),
+                        (x1, label_y),
                         cv2.FONT_HERSHEY_SIMPLEX,
                         0.5,
                         color,
-                        2,
+                        1,
                     )
+                    if speed_estimate is not None:
+                        cv2.putText(
+                            frame,
+                            f"EST {speed_estimate.kmh:.1f} km/h (Lane {speed_estimate.lane_number})",
+                            (x1, speed_y),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.5,
+                            (0, 255, 255),
+                            1,
+                        )
 
         # 只移除確實消失一段時間的追蹤目標，避免仍在畫面中的車輛遺失狀態。
         stale_ids = [
@@ -789,6 +841,7 @@ def run_monitor(
         ]
         for track_id in stale_ids:
             del vehicles[track_id]
+            speed_estimator.remove(track_id)
 
         now = perf_counter()
         instant_fps = 1.0 / max(now - previous_time, 1e-9)
@@ -798,7 +851,7 @@ def run_monitor(
         # 直接畫出目前網頁設定的計數線；端點順序也決定 IN／OUT 的側別。
         with line_lock:
             line_start, line_end = video_config["line"]
-        cv2.line(frame, line_start, line_end, (0, 0, 255), 4)
+        cv2.line(frame, line_start, line_end, (0, 0, 255), 1)
         cv2.circle(frame, line_start, 7, (0, 255, 255), -1)
         cv2.circle(frame, line_end, 7, (0, 255, 255), -1)
         cv2.putText(
@@ -918,6 +971,7 @@ def status():
             },
             "stop_line": getattr(app.state, "stop_line", None),
             "gates": getattr(app.state, "gates", []),
+            "road_boundaries": getattr(app.state, "road_boundaries", None),
             "frame_size": getattr(app.state, "frame_size", None),
         }
 
@@ -963,48 +1017,93 @@ async def save_points(request: Request):
             raise ValueError("至少需要三個 Gate")
         width, height = app.state.frame_size
 
+        def point_of(item):
+            x, y = float(item["x"]), float(item["y"])
+            if not math.isfinite(x) or not math.isfinite(y) or not (0 <= x <= 1 and 0 <= y <= 1):
+                raise ValueError("座標比例必須介於 0 和 1")
+            return {"x": round(x, 5), "y": round(y, 5)}
+
         def line_of(item):
             line = item["line"]
             points = ((float(line["L"]["x"]), float(line["L"]["y"])), (float(line["R"]["x"]), float(line["R"]["y"])))
             # 新版前端傳 0~1 比例；為相容舊網頁快取，像素座標也轉為比例。
             if any(value > 1 for point in points for value in point):
                 points = tuple((x / max(width - 1, 1), y / max(height - 1, 1)) for x, y in points)
-            points = tuple((round(x, 5), round(y, 5)) for x, y in points)
-            if any(not 0 <= value <= 1 for point in points for value in point):
-                raise ValueError("座標比例必須介於 0 和 1")
-            return points
+            normalized = tuple(point_of({"x": x, "y": y}) for x, y in points)
+            if math.hypot(
+                (normalized[1]["x"] - normalized[0]["x"]) * (width - 1),
+                (normalized[1]["y"] - normalized[0]["y"]) * (height - 1),
+            ) < 2:
+                raise ValueError("線段長度不可小於 2 像素")
+            return normalized
+
         stop_points = line_of(stop_line)
         normalized_gates = []
         for gate in gates:
             line = line_of(gate)
-            normalized_gates.append({
+            normalized_gate = {
                 "gate": str(gate["gate"]),
                 "lane": int(gate["lane"]),
                 "station_m": float(gate["station_m"]),
-                "line": {"L": {"x": line[0][0], "y": line[0][1]}, "R": {"x": line[1][0], "y": line[1][1]}},
-            })
+                "line": {"L": line[0], "R": line[1]},
+            }
+            if "anchor" in gate or "angle_deg" in gate:
+                normalized_gate["anchor"] = point_of(gate["anchor"])
+                normalized_gate["angle_deg"] = float(gate["angle_deg"])
+                if not math.isfinite(normalized_gate["angle_deg"]):
+                    raise ValueError("Gate 角度須為有限數字")
+            normalized_gates.append(normalized_gate)
         if any(gate["lane"] < 1 for gate in normalized_gates):
             raise ValueError("lane（車道數）至少為 1")
+        if len({gate["gate"] for gate in normalized_gates}) != len(normalized_gates):
+            raise ValueError("Gate 名稱不可重複")
+        if any(not math.isfinite(gate["station_m"]) for gate in normalized_gates):
+            raise ValueError("Gate 的 station_m 須為有限數字")
         if any(b["station_m"] <= a["station_m"] for a, b in zip(normalized_gates, normalized_gates[1:])):
             raise ValueError("Gate 的 station_m 必須依 Gate 順序遞增")
+        road_boundaries = None
+        if "road_boundaries" in data:
+            raw_boundaries = data["road_boundaries"]
+            road_boundaries = {}
+            for side in ("L", "R"):
+                raw_points = raw_boundaries[side]
+                if not isinstance(raw_points, list) or len(raw_points) < 2:
+                    raise ValueError(f"{side} 道路邊界至少需要兩個點")
+                road_boundaries[side] = [point_of(point) for point in raw_points]
+                start = road_boundaries[side][0]
+                stop = stop_points[0 if side == "L" else 1]
+                if math.hypot(
+                    (start["x"] - stop["x"]) * (width - 1),
+                    (start["y"] - stop["y"]) * (height - 1),
+                ) > 2:
+                    raise ValueError(f"{side} 道路邊界必須從停止線端點開始")
+            lane_count = int(data["lane_count"])
+            if lane_count < 1 or any(gate["lane"] != lane_count for gate in normalized_gates):
+                raise ValueError("所有 Gate 的車道數必須與道路車道數一致")
     except (ValueError, KeyError, TypeError, json.JSONDecodeError) as error:
         raise HTTPException(status_code=422, detail=f"無效的計數線：{error}") from error
 
     with line_lock:
-        app.state.video_config["line"] = stop_points
-        app.state.stop_line = [{"x": x, "y": y} for x, y in stop_points]
+        app.state.video_config["line"] = tuple((point["x"], point["y"]) for point in stop_points)
+        app.state.stop_line = list(stop_points)
         app.state.gates = normalized_gates
+        app.state.road_boundaries = road_boundaries
 
     POINTS_FILE.parent.mkdir(parents=True, exist_ok=True)
     payload = {
-        "schema_version": 2,
+        "schema_version": 3 if road_boundaries is not None else 2,
         "video": {
             "name": getattr(app.state, "source_name", DEFAULT_VIDEO_NAME),
             "coordinate_system": "normalized_0_to_1",
+            "width": width,
+            "height": height,
         },
-        "stop_line": {"line": {"L": {"x": stop_points[0][0], "y": stop_points[0][1]}, "R": {"x": stop_points[1][0], "y": stop_points[1][1]}}},
+        "stop_line": {"line": {"L": stop_points[0], "R": stop_points[1]}},
         "gates": normalized_gates,
     }
+    if road_boundaries is not None:
+        payload["lane_count"] = lane_count
+        payload["road_boundaries"] = road_boundaries
     with POINTS_FILE.open("w", encoding="utf-8") as file:
         json.dump(payload, file, ensure_ascii=False, indent=2)
 

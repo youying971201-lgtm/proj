@@ -874,10 +874,15 @@
       };
     }
 
-    function legacySavePayload() {
+    function savePayload() {
       return {
+        schema_version: 3,
+        lane_count: validLaneCount(),
+        road_boundaries: boundaries,
         stop_line: { line: stopLine },
-        gates: gates.map(({ gate, lane, station_m, line }) => ({ gate, lane, station_m, line }))
+        gates: gates.map(({ gate, lane, station_m, anchor, angle_deg, line }) => ({
+          gate, lane, station_m, anchor, angle_deg, line
+        }))
       };
     }
 
@@ -971,7 +976,7 @@
       const response = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: url === '/save_points' ? JSON.stringify(legacySavePayload()) : undefined
+        body: url === '/save_points' ? JSON.stringify(savePayload()) : undefined
       });
       const data = await response.json();
       if (!response.ok) throw Error(data.detail);
