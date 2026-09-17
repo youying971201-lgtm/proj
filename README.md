@@ -17,7 +17,7 @@
 | 紅燈越線提示 | 已依單一號誌顏色與停止線跨越事件實作；仍需人工確認。 |
 | 車流量觀察 | 已顯示 `IN`／`OUT` 越線計數與本次處理摘要，尚未提供長期統計。 |
 | 車輛行駛／停止狀態 | 已依影像位移分類；不是實際車速。 |
-| 道路標線辨識 | 已整合 Stage-5 分割遮罩及座標 API。 |
+| 道路標線辨識 | 按 Reload LaneNet 後以 Stage-5 對下一幀分割一次，快取遮罩及座標供後續畫面使用。 |
 | 違規變道判定 | 規劃以跨越實線、變道時未打方向燈為候選條件；尚未實作事件判定。 |
 | Gate 測速 | 已有人工校正資料結構；距離映射與通過時間計算尚未接入主流程。 |
 | 雲端多鏡頭監看 | 長期目標；目前為單一來源的本機 FastAPI 服務。 |
@@ -30,7 +30,7 @@ flowchart LR
     B --> C[儲存停止線與 Gate]
     C --> D[逐幀分析]
     D --> E[YOLO11 + ByteTrack]
-    D --> F[Stage-5 道路標線分割]
+    D -. 按 Reload LaneNet .-> F[Stage-5 對下一幀分割一次]
     E --> G[號誌、越線、行駛狀態]
     F --> H[遮罩與座標 API]
     G --> I[MJPEG 網頁畫面]
@@ -40,52 +40,51 @@ flowchart LR
 1. **準備來源。** 未指定時，程式讀取 `inputVideos/IMG_6898.MOV`；也可用 `--source` 指定影片／串流，或用 `--camera` 選擇實體、虛擬攝影機。
 2. **校正畫面。** 伺服器先顯示第一幀，此時不執行 YOLO。於網頁上先畫停止線，再依序畫至少三條 Gate，設定每條 Gate 的車道數。
 3. **啟動判斷。** 點選「開始判斷」後，網頁先呼叫 `/save_points` 寫入校正檔，再呼叫 `/start_processing` 啟動背景工作。影片會從指定的起始影格重新讀取。
-4. **查看結果。** 網頁顯示車輛 ID、偵測框、`MOVING`／`STOPPED` 狀態、號誌顏色、`IN`／`OUT` 越線計數及道路標線。終端機在處理結束時輸出本次統計；道路標線座標可由 API 讀取。
+4. **查看結果。** 網頁顯示車輛 ID、偵測框、`MOVING`／`STOPPED` 狀態、號誌顏色及 `IN`／`OUT` 越線計數。開始判斷後按「Reload LaneNet」才會偵測道路標線並顯示快取結果，座標可由 API 讀取；終端機在處理結束時輸出本次統計。
 5. **重新處理或結束。**「重新判斷」會中止目前工作並以網頁上的校正重新開始；「關閉系統」會停止服務。目前只持久儲存校正資料，沒有匯出標註影片、逐筆事件或統計報表。
 
 系統將「物件偵測與追蹤」及「逐像素標線分割」分為兩條處理路徑：前者保留同一車輛的時間資訊，後者提供道路幾何形狀。停止線與 Gate 由人員在當前場景校正，以適應不同鏡頭位置；正規化座標讓網頁縮放時仍能對應回原始影像。多幀投票、越線防抖區與移動狀態遲滯門檻用來降低單幀偵測抖動造成的反覆切換。
 
 ## 安裝與執行
 
-需要 Python、`requirements.txt` 中的套件、可讀取的影像來源及模型權重。PyTorch／TorchVision 的安裝方式可能因作業系統與 CUDA 版本而異。
+本專題固定使用 **Python 3.12.x**，每次執行都須明確指定此版本。另需 `requirements.txt` 中的套件、可讀取的影像來源及模型權重。PyTorch／TorchVision 的安裝方式可能因作業系統與 CUDA 版本而異。
 
-macOS／Linux：
+macOS：
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install -r requirements.txt
-python python/main.py --source /path/to/video.mp4
+python3.12 --version
+python3.12 -m pip install -r requirements.txt
+python3.12 python/main.py --source /path/to/video.mp4
 ```
 
 Windows PowerShell：
 
 ```powershell
-py -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
-.\.venv\Scripts\python.exe python\main.py --source C:\path\to\video.mp4
+py -3.12 --version
+py -3.12 -m pip install -r requirements.txt
+py -3.12 python\main.py --source C:\path\to\video.mp4
 ```
 
 啟動後開啟 <http://127.0.0.1:8000>。若要使用預設來源，先將 `IMG_6898.MOV` 放進 `inputVideos/`，再省略 `--source`。專題會依測試需求使用 YOLO11s 或 YOLO11x；目前程式預設 `yolo11x.pt`，第一次使用該官方模型名稱時，Ultralytics 會嘗試下載。要改用 11s 或其他權重，先備妥本機 `.pt` 檔，再以 `--model` 指定。道路標線模型預設讀取團隊自行訓練的 `models/road_marking/stage5_roadmark_best.pth`；缺少該模型時可用 `--no-road-markings`。
 
-常用選項：
+常用選項（macOS；Windows 將 `python3.12` 改為 `py -3.12`，並依系統調整路徑）：
 
 ```bash
 # 指定裝置及自訂 YOLO 權重
-python python/main.py --source /path/to/video.mp4 --device cpu --model /path/to/model.pt
+python3.12 python/main.py --source /path/to/video.mp4 --device cpu --model /path/to/model.pt
 
 # 使用攝影機或 OBS Virtual Camera；索引依電腦而異
-python python/main.py --camera 1 --camera-width 1280 --camera-height 720 --camera-fps 30
-python python/main.py --list-cameras --camera-backend auto
+python3.12 python/main.py --camera 1 --camera-width 1280 --camera-height 720 --camera-fps 30
+python3.12 python/main.py --list-cameras --camera-backend auto
 
-# 降低道路標線推論頻率／解析度，或停用道路標線
-python python/main.py --road-marking-every 3 --road-marking-max-side 960
-python python/main.py --no-road-markings
+# 調整 Reload LaneNet 時的道路標線推論解析度，或停用道路標線
+python3.12 python/main.py --road-marking-max-side 960
+python3.12 python/main.py --no-road-markings
 ```
 
-`--device auto` 依序選擇 MPS、CUDA、CPU。YOLO 輸入長邊目前於 MPS 使用 960，CUDA／CPU 使用 640；道路標線模型預設使用長邊 1280。Windows 攝影機無法讀取時可嘗試 `--camera-backend dshow` 或 `msmf`。`start.bat` 會優先尋找專案內虛擬環境；`start.command` 是 macOS 啟動器。其餘選項請執行 `python python/main.py --help`。
+`--device auto` 依序選擇 MPS、CUDA、CPU。YOLO 輸入長邊目前於 MPS 使用 960，CUDA／CPU 使用 640；道路標線模型預設使用長邊 1280。Stage-5 在 YOLO 使用 MPS 時改用 CPU，使用 CUDA 時仍用 CUDA。Windows 攝影機無法讀取時可嘗試 `--camera-backend dshow` 或 `msmf`。其餘選項請在 macOS 執行 `python3.12 python/main.py --help`，或在 Windows 執行 `py -3.12 python\main.py --help`。
 
-Windows 的 `start-virtual-camera.bat` 會以攝影機索引 1、1280×720、30 FPS 與 CUDA 啟動；使用前請先開啟 OBS Virtual Camera，並確認目前電腦支援該裝置及索引。若只想驗證道路標線模型，可執行 `python python/road_marking_demo.py /path/to/image.jpg`，產生單張影像的疊圖與 JSON 座標。
+`start.command` 與 `start.bat` 目前尚未固定使用 Python 3.12.x；依賴 `start.bat` 的 `start-virtual-camera.bat` 也暫勿使用。請先使用上面的明確版本指令；若要使用 Windows 的 OBS Virtual Camera，先啟動它，再以 `py -3.12 python\main.py --camera 1 --camera-width 1280 --camera-height 720 --camera-fps 30 --device cuda` 啟動，並確認裝置、索引及 CUDA 可用。若只想驗證道路標線模型，macOS 可執行 `python3.12 python/road_marking_demo.py /path/to/image.jpg`，產生單張影像的疊圖與 JSON 座標。
 
 ## 停止線與 Gate 校正
 
@@ -124,7 +123,7 @@ YOLO11 偵測 COCO 類別中的汽車、機車、公車、卡車與交通號誌�
 
 ### 道路標線
 
-Stage-5 SegFormer 對每幀進行逐像素語意分割，再將結果縮放回原圖。目前輸出 RLMD 類別 1～10、16，包括槽化區、斑馬線、停止線、實線、虛線及導流線。程式透過連通元件擷取輪廓、中心、外接框及中心線；線類擬合為折線。虛線的 `components` 保留各小段，`polylines` 則將可能屬於同一車道的小段串接。API 同時提供原圖像素 `x/y` 與正規化座標 `nx/ny`；`lane_id` 是單次結果內的折線序號，不是跨影格追蹤 ID。
+開始判斷後按 **Reload LaneNet**，Stage-5 SegFormer 才會載入並對當前影格進行一次逐像素語意分割；模型隨後釋放，偵測結果在後續影格持續疊圖，直到下一次 Reload。未按 Reload 時不執行 Stage-5 推論；重新判斷會沿用本次服務記憶體中的標線，服務重啟則需重新偵測。目前輸出 RLMD 類別 1～10、16，包括槽化區、斑馬線、停止線、實線、虛線及導流線。程式透過連通元件擷取輪廓、中心、外接框及中心線；線類擬合為折線。虛線的 `components` 保留各小段，`polylines` 則將可能屬於同一車道的小段串接。API 同時提供原圖像素 `x/y` 與正規化座標 `nx/ny`；`lane_id` 是單次結果內的折線序號，不是跨影格追蹤 ID。
 
 ### 違規變道構想（尚未實作）
 
@@ -165,10 +164,11 @@ Stage-5 SegFormer 對每幀進行逐像素語意分割，再將結果縮放回�
 | `GET /video_feed` | 標註畫面的 MJPEG 串流。 |
 | `GET /api/status` | 執行狀態、影像尺寸及校正資料。 |
 | `GET /api/road_markings` | 最新道路標線結果及模型狀態。 |
+| `POST /api/reload_lanenet` | 排程對下一張影格重新載入 Stage-5 並偵測一次。 |
 | `POST /api/reset` | 中止並重置本次分析。 |
 | `POST /shutdown` | 停止服務。 |
 
-道路標線結果包含 `frame_index`、`inference_ms`、`model_input_size` 與按類別整理的 `objects`。若設定 `--road-marking-every N`，未推論的影格會沿用上一筆遮罩，應用 `frame_index` 判讀結果時間。網頁顯示畫面與終端機摘要；目前沒有資料庫或報表輸出。
+道路標線結果包含 `frame_index`、`inference_ms`、`model_input_size` 與按類別整理的 `objects`。`frame_index` 是最近一次按 Reload 後的偵測影格。網頁顯示畫面與終端機摘要；目前沒有資料庫或報表輸出。
 
 ## 專案結構
 
@@ -184,17 +184,28 @@ Stage-5 SegFormer 對每幀進行逐像素語意分割，再將結果縮放回�
 | `models/road_marking/` | Stage-5 checkpoint。 |
 | `result/lanenet/` | 精選的 Stage-5 定性視覺與模型對照圖。 |
 | `result/yolo/` | 預留 YOLO 驗證成果目錄。 |
-| `tests/` | 影像來源與道路標線座標的單元測試。 |
+| `tests/` | 影像來源、道路標線座標與 Reload LaneNet 的單元測試。 |
 
 `frontend/main2.html` 與 `frontend/toweb.py` 是其他／舊版介面及串流輔助程式，目前首頁不使用。`yaml/my_track.yaml` 是追蹤器設定範例，主程式目前指定 Ultralytics 的 `bytetrack.yaml`。
 
 ## 驗證與限制
 
+macOS：
+
 ```bash
-python -m py_compile python/*.py
-python -m unittest discover -s tests -v
+python3.12 -m compileall -q python
+python3.12 -m unittest discover -s tests -v
 ```
 
-現有測試涵蓋道路標線座標處理與影像來源輔助函式；團隊也以自行錄製的多種實際路況影片，在 Windows、macOS 的筆電與桌機上進行回測。Stage-5 的四張精選結果圖已放在 `result/lanenet/`，但目前沒有可重現的評估設定或量化指標，因此不能由視覺對照推論偵測準確率。
+Windows PowerShell：
+
+```powershell
+py -3.12 -m compileall -q python
+py -3.12 -m unittest discover -s tests -v
+```
+
+現有測試涵蓋道路標線座標、Reload LaneNet 及影像來源輔助函式；團隊也以自行錄製的多種實際路況影片，在 Windows、macOS 的筆電與桌機上進行回測。Stage-5 的四張精選結果圖已放在 `result/lanenet/`，但目前沒有可重現的評估設定或量化指標，因此不能由視覺對照推論偵測準確率。
 
 完整流程需要模型、影片或攝影機及可用的運算環境。單一號誌選取、追蹤 ID 中斷、遮蔽、鏡頭晃動與透視變化都可能影響結果。現階段沒有現場執法或物理測速驗證，也沒有逐筆事件持久化。
+
+多人協作時，每次完成修改都要依實際程式狀態同步檢查並更新本文件與 `AGENTS.md`；目前功能、操作命令與未完成目標應在兩份文件中保持一致。

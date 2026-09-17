@@ -76,6 +76,7 @@
       background: #dedede;
       border-radius: 8px;
       display: flex;
+      flex-wrap: wrap;
       gap: 12px;
       margin-top: 12px;
       padding: 10px 14px;
@@ -236,6 +237,7 @@
         </label>
         <button class="start" id="start" disabled>開始判斷</button>
         <button class="start" id="resetBtn" style="background: #e75050; display: none;">重新判斷</button>
+        <button class="start" id="reloadLaneNet" disabled>Reload LaneNet</button>
         <button class="start" onclick="closeApplication()" style="background: #454545;">關閉系統</button>
       </section>
       <section class="gate-panel">
@@ -296,6 +298,7 @@
       redoButton = document.querySelector('#redo'),
       colourButton = document.querySelector('#colour'),
       startButton = document.querySelector('#start'),
+      reloadButton = document.querySelector('#reloadLaneNet'),
       defaultLaneInput = document.querySelector('#defaultLane'),
       gateList = document.querySelector('#gateList');
 
@@ -307,6 +310,28 @@
     };
 
     const colours = ['#24b576', '#2987d8', '#f0a326', '#a55eea'];
+    let processingStarted = false,
+      roadModelEnabled = false,
+      reloadInProgress = false;
+
+    async function updateReloadAvailability() {
+      try {
+        const response = await fetch('/api/status', { cache: 'no-store' });
+        if (!response.ok) throw Error('無法讀取 Stage-5 狀態');
+        const data = await response.json();
+        processingStarted = data.processing_started;
+        roadModelEnabled = data.road_markings.enabled;
+        reloadButton.disabled = !processingStarted || !roadModelEnabled ||
+          reloadInProgress || data.road_markings.state === 'loading';
+      } catch (error) {
+        roadModelEnabled = false;
+        console.error(error);
+        reloadButton.disabled = true;
+      }
+    }
+
+    updateReloadAvailability();
+    setInterval(updateReloadAvailability, 2000);
 
     let stopLine = null,
       gates = [],
@@ -324,8 +349,10 @@
 
     image.onload = () => {
       resize();
-      progress('stop');
-      status.textContent = '請拉線設定停止線。';
+      if (!processingStarted) {
+        progress('stop');
+        status.textContent = '請拉線設定停止線。';
+      }
     };
 
     image.onerror = () => {
@@ -518,9 +545,11 @@
       try {
         await request('/save_points');
         await request('/start_processing');
+        processingStarted = true;
         image.src = '/video_feed?' + Date.now();
         progress('run');
         status.textContent = '✅ 判斷已開始。';
+        await updateReloadAvailability();
         
         // 開始後，隱藏開始按鈕，顯示重新判斷按鈕
         startButton.style.display = 'none';
@@ -544,10 +573,40 @@
         await request('/start_processing');
         
         // 4. 強制刷新圖片網址以解凍畫面
+        processingStarted = true;
         image.src = '/video_feed?' + Date.now();
         status.textContent = '✅ 已重新開始判斷。';
+        await updateReloadAvailability();
       } catch (error) {
         status.textContent = '❌ 重置失敗: ' + error.message;
+      }
+    };
+
+    reloadButton.onclick = async () => {
+      reloadInProgress = true;
+      reloadButton.disabled = true;
+      status.textContent = '⏳ 正在重新載入 Stage-5 並偵測目前畫面的標線…';
+      try {
+        await request('/api/reload_lanenet');
+        while (true) {
+          await new Promise(resolve => setTimeout(resolve, 500));
+          const response = await fetch('/api/status', { cache: 'no-store' });
+          if (!response.ok) throw Error('無法讀取 Stage-5 狀態');
+          const data = await response.json();
+          const road = data.road_markings;
+          if (road.state === 'ready') {
+            status.textContent = '✅ ' + road.message;
+            break;
+          }
+          if (road.state === 'error' || road.state === 'disabled') {
+            throw Error(road.message);
+          }
+        }
+      } catch (error) {
+        status.textContent = '❌ ' + error.message;
+      } finally {
+        reloadInProgress = false;
+        await updateReloadAvailability();
       }
     };
 
