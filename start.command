@@ -1,42 +1,54 @@
 #!/bin/zsh
+set -eu
+unsetopt BG_NICE
 
-# 1. 自動切換到 .command 所在的專案根目錄 (確保相對路徑絕對正確)
 cd "$(dirname "$0")"
 
-echo "========================================"
-echo "  YOLO 車流監控系統 - 啟動程序 (Mac)"
-echo "========================================"
+if ! command -v python3.12 >/dev/null 2>&1; then
+    echo "ERROR: 找不到 python3.12。請先安裝 Python 3.12.x。" >&2
+    exit 1
+fi
+python_version="$(python3.12 --version 2>&1)"
+case "$python_version" in
+    "Python 3.12."*) echo "使用 $python_version" ;;
+    *) echo "ERROR: 必須使用 Python 3.12.x，目前是 $python_version" >&2; exit 1 ;;
+esac
 
-# 2. 強制清空舊的 8000 埠號 (防呆機制，解決 Errno 48)
-lsof -ti :8000 | xargs kill -9 2>/dev/null
+for arg in "$@"; do
+    case "$arg" in
+        -h|--help|--list-cameras) exec python3.12 python/main.py "$@" ;;
+    esac
+done
 
-# 3. 自動偵測 Python 環境 (最高相容性核心)
-# 腳本會依序尋找常見的虛擬環境，找不到則退回系統全域 python3
-PYTHON_CMD="python3"
-if [ -f "./.venv/bin/python" ]; then
-    PYTHON_CMD="./.venv/bin/python"
-    echo "[INFO] 偵測到 .venv 虛擬環境"
-elif [ -f "./venv/bin/python" ]; then
-    PYTHON_CMD="./venv/bin/python"
-    echo "[INFO] 偵測到 venv 虛擬環境"
-elif [ -f "./env/bin/python" ]; then
-    PYTHON_CMD="./env/bin/python"
-    echo "[INFO] 偵測到 env 虛擬環境"
-else
-    echo "[INFO] 未偵測到本地虛擬環境，將使用系統全域 Python3"
+port=8000
+previous_arg=""
+for arg in "$@"; do
+    if [[ "$previous_arg" == "--port" ]]; then
+        port="$arg"
+        break
+    fi
+    case "$arg" in
+        --port=*) port="${arg#--port=}"; break ;;
+    esac
+    previous_arg="$arg"
+done
+
+if lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; then
+    echo "ERROR: 埠號 $port 已被占用，請關閉既有服務或指定其他 --port。" >&2
+    exit 1
 fi
 
-# 4. 將「輪詢檢查與開網頁」丟到背景執行
 (
-    echo "[INFO] 正在等待 FastAPI 伺服器啟動..."
-    while ! curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8000 | grep "200" > /dev/null; do
+    for ((attempt = 0; attempt < 40; attempt++)); do
+        if curl -fs --max-time 1 -o /dev/null "http://127.0.0.1:$port"; then
+            open "http://127.0.0.1:$port"
+            exit 0
+        fi
         sleep 0.5
     done
-    echo "[INFO] ✅ 伺服器已就緒，正在開啟網頁..."
-    open http://127.0.0.1:8000
+    echo "ERROR: 伺服器未在 20 秒內啟動。" >&2
 ) &
+opener_pid=$!
+trap 'kill "$opener_pid" 2>/dev/null || true' EXIT
 
-# 5. 在前景啟動 Python 後端主程式 (終端機畫面會留著顯示 Log)
-echo "[INFO] 正在啟動後端主程式..."
-echo "----------------------------------------"
-$PYTHON_CMD python/main.py
+python3.12 python/main.py "$@"

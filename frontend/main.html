@@ -295,12 +295,6 @@
     e.returnValue = ''; 
     });
 
-// 2. 當使用者真的點擊了「離開」，觸發 unload 事件，發送關機訊號
-    window.addEventListener('unload', function () {
-        // 使用 sendBeacon 確保網頁關閉時，請求一定能送達後端
-        navigator.sendBeacon('/api/shutdown');
-    });
-    
     const image = document.querySelector('#stream'),
       canvas = document.querySelector('#canvas'),
       ctx = canvas.getContext('2d'),
@@ -709,12 +703,13 @@
     };
 
     canvas.onpointermove = e => {
-      const point = normal(e);
       if (!pointerAction || pointerAction.kind !== 'rotate') {
-        hoverPoint = point;
-        paintAll();
+        if (stopAnchor || ['left', 'right'].includes(currentPhase())) {
+          hoverPoint = normal(e);
+          paintAll();
+        }
       } else {
-        updateRotation(pointerAction.index, point);
+        updateRotation(pointerAction.index, normal(e));
       }
     };
 

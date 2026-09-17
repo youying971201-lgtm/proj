@@ -4,7 +4,7 @@
 
 目前主程式以影片、攝影機或 OpenCV 可讀取的影像串流為輸入，分析車輛、交通號誌、停止線越線事件及道路標線。操作員在瀏覽器的第一幀畫面完成校正後，FastAPI 背景工作會逐幀處理影像，並以 MJPEG 串流顯示標註結果。
 
-> **目前功能範圍：** Gate 已能輸出車輛跨越相鄰線段的**預估區間均速**，顯示為 `EST ... km/h`。前端預填的 10／4／6 公尺尚未做現地測量，像素車道差也未經透視校正，因此目前數字只供測試，不可視為精確或執法測速。`ILLEGAL` 是依程式的號誌與越線規則產生的提示，應由人員複核。
+> **目前功能範圍：** Gate 已能輸出車輛跨越相鄰線段的**預估區間均速**，顯示為 `EST AVG ... km/h`。前端預填的 10／4／6 公尺尚未做現地測量，像素車道差也未經透視校正，因此目前數字只供測試，不可視為精確或執法測速。`ILLEGAL` 是依程式的號誌與越線規則產生的提示，應由人員複核。
 
 ## 背景、目標與應用
 
@@ -42,7 +42,7 @@ flowchart LR
 1. **準備來源。** 未指定時，程式讀取 `python/main.py` 中 `DEFAULT_VIDEO_NAME` 指定的 `inputVideos/` 影片；也可用 `--source` 指定影片／串流，或用 `--camera` 選擇實體、虛擬攝影機。
 2. **校正畫面。** 伺服器先顯示第一幀，此時不執行 YOLO。於網頁上點兩下設定停止線端點、逐點標出道路左右邊界並按 Enter 完成，再點選虛線頂端建立至少五條一般 Gate，並設定整條路的車道數。
 3. **啟動判斷。** 點選「開始判斷」後，網頁先呼叫 `/save_points` 寫入校正檔，再呼叫 `/start_processing` 啟動背景工作。影片會從指定的起始影格重新讀取。
-4. **查看結果。** 網頁顯示車輛 ID、偵測框、`MOVING`／`STOPPED` 狀態、號誌顏色及 `IN`／`OUT` 越線計數；車輛完成兩條相鄰 Gate 的穿越後，框上方顯示 `EST ... km/h` 與車道序號。開始判斷後按「Reload LaneNet」才會偵測道路標線並顯示快取結果，座標可由 API 讀取；終端機在處理結束時輸出本次統計。
+4. **查看結果。** 網頁顯示車輛 ID、偵測框、`MOVING`／`STOPPED` 狀態、號誌顏色及 `IN`／`OUT` 越線計數；車輛完成兩條相鄰 Gate 的穿越後，框上方顯示 `EST AVG ... km/h` 與車道序號。開始判斷後按「Reload LaneNet」才會偵測道路標線並顯示快取結果，座標可由 API 讀取；終端機在處理結束時輸出本次統計。
 5. **重新處理或結束。**「重新判斷」會中止目前工作並以網頁上的校正重新開始；「關閉系統」會停止服務。目前只持久儲存校正資料，沒有匯出標註影片、逐筆事件或統計報表。
 
 系統將「物件偵測與追蹤」及「逐像素標線分割」分為兩條處理路徑：前者保留同一車輛的時間資訊，後者提供道路幾何形狀。停止線與 Gate 由人員在當前場景校正，以適應不同鏡頭位置；正規化座標讓網頁縮放時仍能對應回原始影像。多幀投票、越線防抖區與移動狀態遲滯門檻用來降低單幀偵測抖動造成的反覆切換。
@@ -86,9 +86,9 @@ python3.12 python/main.py --no-road-markings
 
 `--device auto` 依序選擇 MPS、CUDA、CPU。YOLO 輸入長邊目前於 MPS 使用 640，CUDA／CPU 使用 512；道路標線模型預設使用長邊 1280。Stage-5 在 YOLO 使用 MPS 時改用 CPU，使用 CUDA 時仍用 CUDA。Windows 攝影機無法讀取時可嘗試 `--camera-backend dshow` 或 `msmf`。其餘選項請在 macOS 執行 `python3.12 python/main.py --help`，或在 Windows 執行 `py -3.12 python\main.py --help`。
 
-Gate 更改已在 macOS 使用 Python 3.12 執行 `python3.12 -m unittest discover -s tests -v`（16 項通過）及 `python3.12 -m compileall -q python`。前端幾何與 JSON 流程以 JavaScriptCore 模擬測試通過。專案目前沒有可用測試影片，尚未做真實車速對照、完整 MJPEG 畫面驗證或 Windows 實測。
+Gate 與效能更改已在 macOS 使用 Python 3.12 執行 `python3.12 -m unittest discover -s tests -v`（19 項通過，含合成影格的車框上方速度文字測試）及 `python3.12 -m compileall -q python`。前端幾何與 JSON 流程以 JavaScriptCore 模擬測試通過，`start.command` 已通過 zsh 語法檢查及 `./start.command --help` 啟動檢查。專案目前沒有可用測試影片，尚未做真實車速對照、完整 MJPEG 畫面驗證或 Windows 實測。
 
-`start.command` 與 `start.bat` 目前尚未固定使用 Python 3.12.x；依賴 `start.bat` 的 `start-virtual-camera.bat` 也暫勿使用。請先使用上面的明確版本指令；若要使用 Windows 的 OBS Virtual Camera，先啟動它，再以 `py -3.12 python\main.py --camera 1 --camera-width 1280 --camera-height 720 --camera-fps 30 --device cuda` 啟動，並確認裝置、索引及 CUDA 可用。若只想驗證道路標線模型，macOS 可執行 `python3.12 python/road_marking_demo.py /path/to/image.jpg`，產生單張影像的疊圖與 JSON 座標。
+`start.command` 與 `start.bat` 現在會確認 Python 3.12.x 並直接呼叫該版本，不搜尋其他執行環境；macOS 腳本遇到已占用的埠號會報錯，不會強制結束其他服務。`start-virtual-camera.bat` 使用 `--device auto`，有 CUDA 時會選 CUDA，否則走 CPU。腳本仍需在各自系統以實際影片或攝影機完成啟動驗證；若要使用 Windows 的 OBS Virtual Camera，先啟動它，再執行 `start-virtual-camera.bat` 或明確指定 `py -3.12 python\main.py --camera 1 --camera-width 1280 --camera-height 720 --camera-fps 30 --device auto`。若只想驗證道路標線模型，macOS 可執行 `python3.12 python/road_marking_demo.py /path/to/image.jpg`，產生單張影像的疊圖與 JSON 座標。
 
 ## 停止線與 Gate 校正
 
@@ -138,7 +138,7 @@ YOLO11 偵測 COCO 類別中的汽車、機車、公車、卡車與交通號誌�
 
 ### 道路標線
 
-開始判斷後按 **Reload LaneNet**，Stage-5 SegFormer 才會載入並對當前影格進行一次逐像素語意分割；模型隨後釋放，偵測結果在後續影格持續疊圖，直到下一次 Reload。未按 Reload 時不執行 Stage-5 推論；重新判斷會沿用本次服務記憶體中的標線，服務重啟則需重新偵測。目前輸出 RLMD 類別 1～10、16，包括槽化區、斑馬線、停止線、實線、虛線及導流線。程式透過連通元件擷取輪廓、中心、外接框及中心線；線類擬合為折線。虛線的 `components` 保留各小段，`polylines` 則將可能屬於同一車道的小段串接。API 同時提供原圖像素 `x/y` 與正規化座標 `nx/ny`；`lane_id` 是單次結果內的折線序號，不是跨影格追蹤 ID。
+開始判斷後按 **Reload LaneNet**，Stage-5 SegFormer 才會載入並對當前影格進行一次逐像素語意分割；模型隨後釋放，偵測結果在後續影格持續疊圖，直到下一次 Reload。未按 Reload 時不執行 Stage-5 推論；重新判斷會沿用本次服務記憶體中的標線，服務重啟則需重新偵測。標線疊圖的類別色彩遮罩與折線像素座標也會隨結果快取，避免每幀重建。合成 1280×720 影像、20 次繪製的本機測試中，每幀約由 7.5 ms 降至 4.6 ms；這不是完整 YOLO 處理速度。目前輸出 RLMD 類別 1～10、16，包括槽化區、斑馬線、停止線、實線、虛線及導流線。程式透過連通元件擷取輪廓、中心、外接框及中心線；線類擬合為折線。虛線的 `components` 保留各小段，`polylines` 則將可能屬於同一車道的小段串接。API 同時提供原圖像素 `x/y` 與正規化座標 `nx/ny`；`lane_id` 是單次結果內的折線序號，不是跨影格追蹤 ID。
 
 ### 違規變道構想（尚未實作）
 

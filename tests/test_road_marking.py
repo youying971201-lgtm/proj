@@ -8,10 +8,25 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
 
-from road_marking import extract_marking_coordinates
+from road_marking import RoadMarkingResult, draw_road_markings, extract_marking_coordinates
 
 
 class RoadMarkingCoordinateTests(unittest.TestCase):
+    def test_cached_overlay_updates_when_selected_classes_change(self):
+        frame = np.zeros((12, 12, 3), dtype=np.uint8)
+        class_map = np.zeros((12, 12), dtype=np.uint8)
+        class_map[2, 2] = 4
+        class_map[8, 8] = 9
+        result = RoadMarkingResult(class_map, [], 0.0, (12, 12))
+
+        solid_only = draw_road_markings(frame, result, class_ids=(4,))
+        dashed_only = draw_road_markings(frame, result, class_ids=(9,))
+
+        self.assertTrue(np.any(solid_only[2, 2] != 0))
+        self.assertTrue(np.all(solid_only[8, 8] == 0))
+        self.assertTrue(np.any(dashed_only[8, 8] != 0))
+        self.assertTrue(np.all(dashed_only[2, 2] == 0))
+
     def test_dashed_line_keeps_segments_and_builds_full_polyline(self):
         class_map = np.zeros((180, 240), dtype=np.uint8)
         for top, left in ((130, 120), (90, 115), (50, 110)):

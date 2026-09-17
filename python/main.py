@@ -2,9 +2,11 @@ import argparse
 import json
 import math
 import os
+import signal
+import time
 from pathlib import Path
 from threading import Condition, Lock, Thread
-from time import perf_counter, sleep
+from time import perf_counter
 
 import cv2
 import numpy as np
@@ -27,12 +29,6 @@ from road_marking import RoadMarkingDetector, draw_road_markings
 from trafficLight import TrafficLightDetector
 from video_source import CAMERA_BACKENDS, list_available_cameras, open_video_capture
 
-import os
-import signal
-import threading
-import time
-
-
 # 基本設定
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 # 影像來源預設值：改成 "camera" 使用攝影機，改成 "video" 使用下方影片。
@@ -42,19 +38,18 @@ DEFAULT_CAMERA_INDEX = 1
 DEFAULT_CAMERA_WIDTH = 1280
 DEFAULT_CAMERA_HEIGHT = 720
 DEFAULT_CAMERA_FPS = 30.0
-# 預設使用 COCO 預訓練的 YOLO11s。第一次啟動會由 Ultralytics 自動下載。
+# 預設使用 COCO 預訓練的 YOLO11x。第一次啟動會由 Ultralytics 自動下載。
 MODEL_PATH = "yolo11x.pt"
 ROAD_MARKING_MODEL_PATH = (
     PROJECT_ROOT / "models" / "road_marking" / "stage5_roadmark_best.pth"
 )
 START_TIME_SECONDS = 0.0 #影片開始時間
 END_TIME_SECONDS = None # 影片結束時間
-DEVICE = None #顯示裝置
 # YOLO11 COCO 類別：car=2、motorcycle=3、bus=5、truck=7、traffic light=9。
 CLASSES_TO_DETECT = [2, 3, 5, 7, 9]
 VEHICLE_CLASSES = {2, 3, 5, 7}
 MPS_IMAGE_SIZE = 640  # M2 Air GPU 上兼顧偵測品質與長時間運行溫度／速度。
-CPU_IMAGE_SIZE = 512  # MPS 暫時不可用時，避免 YOLO11s 在 CPU 上過度延遲。
+CPU_IMAGE_SIZE = 512  # CPU／CUDA 共用；CPU 上避免 YOLO11x 過度延遲。
 TRACK_TTL_FRAMES = 90
 DEBUG = True
 LINE_DEAD_ZONE_PIXELS = 12
@@ -131,23 +126,19 @@ road_marking_status = {
 }
 
 # in_transition 表示「線的哪一側移動到哪一側」算 IN，其反向則算 OUT。
-# playback_speed=播放速度
 VIDEO_CONFIGS = {
     # day_green_normal.mp4（1920x1080）：車輛由遠方向鏡頭靠近，使用橫線。
     "day_green_normal.mp4": {
         "line": ((280, 650), (1120, 650)),
         "in_transition": (-1, 1),  # 畫面上方 -> 下方為 IN
-        "playback_speed": 1.0,
     },
     "day_intersection_multi_car.mp4": {
         "line": ((420, 875), (1840, 875)),
         "in_transition": (-1, 1),  # 畫面上方 -> 下方為 IN
-        "playback_speed": 1.0,
     },
     "night_red_stop.mp4": {
         "line": ((640, 345), (640, 650)),
         "in_transition": (1, -1),  # 畫面左側 -> 右側為 IN
-        "playback_speed": 0.25,
     },
 }
 
@@ -253,7 +244,6 @@ def get_video_config(video_name, width, height):
         return {
             "line": ((round(width * 0.15), line_y), (round(width * 0.85), line_y)),
             "in_transition": (-1, 1),
-            "playback_speed": 1.0,
         }
 
     config = VIDEO_CONFIGS[video_name]
@@ -540,7 +530,9 @@ def run_monitor(
         video_duration = None
         start_frame = 0
         end_frame = 0
+        pending_frame = frame
     else:
+        pending_frame = None
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         video_duration = total_frames / fps if total_frames > 0 else None
         if video_duration is not None and START_TIME_SECONDS >= video_duration:
@@ -577,16 +569,13 @@ def run_monitor(
         speed_gates = [dict(gate) for gate in app.state.gates]
         speed_boundaries = getattr(app.state, "road_boundaries", None)
     line_start, line_end = video_config["line"]
-    playback_speed = video_config["playback_speed"]
     print(f"Counting line for {source_name}: start={line_start}, end={line_end}")
-    print(f"Playback speed: {playback_speed:.0%}")
     light_detector = TrafficLightDetector()
     speed_estimator = GateSpeedEstimator(speed_gates, (width, height), speed_boundaries)
 
     vehicles = {}
     total_vehicle_ids = set()
     illegal_vehicle_ids = set()
-    crossing_events = []
     direction_counts = {"IN": 0, "OUT": 0}
     # frame_count 保留原始影片中的影格編號，方便回查違規發生位置。
     frame_count = start_frame
@@ -630,12 +619,14 @@ def run_monitor(
             and int(cap.get(cv2.CAP_PROP_POS_FRAMES)) >= end_frame
         ):
             break
-        ret, frame = cap.read()
+        if pending_frame is not None:
+            ret, frame = True, pending_frame
+            pending_frame = None
+        else:
+            ret, frame = cap.read()
         if not ret:
             if is_live_source:
-                print(f"攝影機畫面中斷，準備重新連線：{source_name}")
-                cap.release()
-                continue
+                print(f"攝影機畫面中斷，停止處理：{source_name}")
             break
         frame_count += 1
         if is_live_source:
@@ -668,8 +659,6 @@ def run_monitor(
             "classes": CLASSES_TO_DETECT,
             "verbose": False,
         }
-        if DEVICE is not None:
-            track_options["device"] = DEVICE
         inference_frame = frame
         result = model.track(
             inference_frame,
@@ -737,20 +726,14 @@ def run_monitor(
 
             vehicle_boxes = []
             vehicle_ids = []
-            vehicle_classes = []
-            vehicle_confidences = []
 
-            for box, track_id, class_id, confidence in zip(
-                boxes, ids, classes, confidences
-            ):
+            for box, track_id, class_id in zip(boxes, ids, classes):
                 if class_id not in VEHICLE_CLASSES:
                     continue
                 x1, y1, x2, y2 = box
-                center = ((x1 + x2) // 2, (y1 + y2) // 2)
+                center = ((x1 + x2) // 2, y2)
                 vehicle_boxes.append(box)
                 vehicle_ids.append(track_id)
-                vehicle_classes.append(class_id)
-                vehicle_confidences.append(confidence)
                 total_vehicle_ids.add(int(track_id))
 
                 if track_id not in vehicles:
@@ -766,9 +749,7 @@ def run_monitor(
                     vehicle = vehicles[track_id]
                     x1, y1, x2, y2 = vehicle_boxes[index]
                     center = ((x1 + x2) // 2, y2)
-                    with line_lock:
-                        active_config = dict(video_config)
-                    direction = detect_crossing(vehicle, center, active_config)
+                    direction = detect_crossing(vehicle, center, video_config)
                     if direction == "IN" and vehicle.crossed_in:
                         direction = None
                     elif direction == "OUT" and vehicle.crossed_out:
@@ -777,9 +758,6 @@ def run_monitor(
                     if direction:
                         is_new_violation = vehicle.mark_crossing(
                             direction, traffic_light_state
-                        )
-                        crossing_events.append(
-                            (frame_count, int(track_id), direction, traffic_light_state)
                         )
                         direction_counts[direction] += 1
                         print(
@@ -825,7 +803,7 @@ def run_monitor(
                     if speed_estimate is not None:
                         cv2.putText(
                             frame,
-                            f"EST {speed_estimate.kmh:.1f} km/h (Lane {speed_estimate.lane_number})",
+                            f"EST AVG {speed_estimate.kmh:.1f} km/h (Lane {speed_estimate.lane_number})",
                             (x1, speed_y),
                             cv2.FONT_HERSHEY_SIMPLEX,
                             0.5,
@@ -849,8 +827,7 @@ def run_monitor(
         previous_time = now
 
         # 直接畫出目前網頁設定的計數線；端點順序也決定 IN／OUT 的側別。
-        with line_lock:
-            line_start, line_end = video_config["line"]
+        line_start, line_end = video_config["line"]
         cv2.line(frame, line_start, line_end, (0, 0, 255), 1)
         cv2.circle(frame, line_start, 7, (0, 255, 255), -1)
         cv2.circle(frame, line_end, 7, (0, 255, 255), -1)
@@ -926,7 +903,7 @@ def run_monitor(
     print("\n========== Summary ==========")
     print(f"Unique tracked vehicles: {len(total_vehicle_ids)}")
     print(f"Violating vehicles: {len(illegal_vehicle_ids)}")
-    print(f"Crossing events: {len(crossing_events)}")
+    print(f"Crossing events: {sum(direction_counts.values())}")
     print(f"IN: {direction_counts['IN']}")
     print(f"OUT: {direction_counts['OUT']}")
     print("=============================")
@@ -999,11 +976,6 @@ def request_lanenet_reload():
             message="等待下一張影格，準備重新載入 Stage-5",
         )
     return {"status": "queued", "message": "Stage-5 重新偵測已排程"}
-
-
-def video_config_for_response():
-    """回傳目前線段；背景工作尚未讀到影片大小前可能沒有設定。"""
-    return getattr(app.state, "line", None)
 
 
 @app.post("/save_points")
@@ -1151,7 +1123,7 @@ def main():
     source_group = parser.add_mutually_exclusive_group()
     source_group.add_argument(
         "--source",
-        help="影片、串流網址或影像來源路徑；未指定時預設使用虛擬相機",
+        help="影片、串流網址或影像來源路徑；未指定時依 DEFAULT_INPUT_MODE 選擇來源",
     )
     source_group.add_argument(
         "--camera",
@@ -1196,7 +1168,7 @@ def main():
     parser.add_argument(
         "--model",
         default=MODEL_PATH,
-        help="YOLO 權重 .pt 檔路徑（預設 yolo11s.pt，首次會自動下載）",
+        help="YOLO 權重 .pt 檔路徑（預設 yolo11x.pt，首次會自動下載）",
     )
     parser.add_argument(
         "--road-model",

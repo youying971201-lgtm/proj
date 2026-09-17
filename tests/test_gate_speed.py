@@ -82,6 +82,16 @@ class GateSpeedTests(unittest.TestCase):
         estimator.update(11, (200, 180), 5.0, 12)
         self.assertIsNone(estimator.update(11, (200, 220), 5.4, 13))
 
+    def test_long_live_pause_resets_pending_gate_pair(self):
+        estimator = GateSpeedEstimator([
+            gate("Gate 1", 0, (100, 100), (300, 100)),
+            gate("Gate 2", 10, (100, 200), (300, 200)),
+        ], (WIDTH, HEIGHT))
+        estimator.update(12, (200, 80), 0.0, 1)
+        estimator.update(12, (200, 120), 0.4, 2)
+        estimator.update(12, (200, 180), 5.0, 3)
+        self.assertIsNone(estimator.update(12, (200, 220), 5.4, 4))
+
     def test_reverse_travel_uses_optional_four_meter_interval(self):
         estimator = GateSpeedEstimator([
             gate("Gate 1", 0, (100, 100), (300, 100)),

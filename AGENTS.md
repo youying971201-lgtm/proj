@@ -14,9 +14,9 @@
 
 - `python/main.py` 提供單一影像來源的 FastAPI／MJPEG 服務。第一幀供操作員在 `frontend/main.html` 點兩下設定停止線端點、逐點標示左右道路邊界並按 Enter 完成，再點虛線頂端建立 Gate 並調整角度；前端要求至少五條一般 Gate，開始後才逐幀分析。後端 `/save_points` 仍只要求至少三條 Gate。
 - YOLO11（目前預設 `yolo11x.pt`，可指定其他權重）與 ByteTrack 偵測、追蹤車輛；現有號誌顏色、停止線越線、`IN`／`OUT` 計數與 `ILLEGAL` 提示。`MOVING`／`STOPPED` 是影像位移分類，並非實際速度。
-- `python/road_marking.py` 使用團隊訓練的 Stage-5 SegFormer checkpoint。按下 **Reload LaneNet** 後，服務才對下一張影格推論一次，釋放模型並快取標線結果供後續畫面顯示；目前不是逐幀分割。API 為 `POST /api/reload_lanenet`、`GET /api/road_markings`。
+- `python/road_marking.py` 使用團隊訓練的 Stage-5 SegFormer checkpoint。按下 **Reload LaneNet** 後，服務才對下一張影格推論一次，釋放模型並快取標線結果供後續畫面顯示；類別色彩遮罩與折線像素座標也隨結果快取，避免每幀重建。目前不是逐幀分割。API 為 `POST /api/reload_lanenet`、`GET /api/road_markings`。
 - `cord_data/points_data.json` 是操作員產生的執行時校正資料。新版前端傳版本 3 JSON，後端保留停止線、Gate L/R、道路邊界、Gate 錨點與影像像素角度；舊版只傳 L/R 時仍使用版本 2。前端另可匯出／匯入版本 3 的 `gate_geometry.json`。Gate 的 `lane` 是固定道路車道數；前端暫以 Gate 1 = 0 m、每個一般 Gate 間隔 10 m、選配 `.4` Gate 相對前一一般 Gate 加 4 m 填入 `station_m`。
-- `python/gate_speed.py` 以同一車輛接地點的有限 Gate 穿越時間計算預估區間均速，依左右道路邊界的像素路徑長度比近似修正彎道內外車道差；`python/main.py` 將 `EST ... km/h` 顯示於車輛框上方。距離未經現地測量，未做透視校正及實測車速驗證，不得描述為精確或執法測速。
+- `python/gate_speed.py` 以同一車輛接地點的有限 Gate 穿越時間計算預估區間均速，依左右道路邊界的像素路徑長度比近似修正彎道內外車道差；`python/main.py` 將 `EST AVG ... km/h` 顯示於車輛框上方。距離未經現地測量，未做透視校正及實測車速驗證，不得描述為精確或執法測速。
 - 違規變道（跨越實線、未打方向燈）及雲端多鏡頭監看仍屬規劃，不能寫成已完成或已驗證的功能。
 
 ## 專案結構
@@ -53,7 +53,7 @@ py -3.12 -m unittest discover -s tests -v
 
 服務啟動後開啟 `http://127.0.0.1:8000`。需要 CPU 推論時用 `--device cpu`；切換 YOLO 權重用 `--model`。功能變更時，除相關單元測試外，還要以適用的影片或攝影機檢查受影響的 API／網頁流程。跨平台行為變更應在 Windows、macOS 各驗證一次，無法驗證的平台要在交付說明中標明。
 
-2026-09-17 的 Gate 更改已在 macOS 以 `python3.12 -m unittest discover -s tests -v` 通過 16 項測試，`python3.12 -m compileall -q python` 通過；前端另以本機 JavaScriptCore 模擬停止線、邊界、Gate、Enter、JSON 匯入與匯出邏輯。專案內目前無可用測試影片，尚未完成真實影片速度對照或 Windows 實測。
+2026-09-17 的 Gate 與效能更改已在 macOS 以 `python3.12 -m unittest discover -s tests -v` 通過 19 項測試（含合成影格的車框上方速度文字測試），`python3.12 -m compileall -q python` 通過；前端另以本機 JavaScriptCore 模擬停止線、邊界、Gate、Enter、JSON 匯入與匯出邏輯。`start.command` 已通過 zsh 語法檢查及 `./start.command --help` 啟動檢查。合成 1280×720 標線疊圖測試由約 7.5 ms／幀降為 4.6 ms／幀，不代表完整流程 FPS。專案內目前無可用測試影片，尚未完成真實影片速度對照或 Windows 實測。
 
 ## 未完成目標與實現辦法
 
@@ -61,7 +61,7 @@ py -3.12 -m unittest discover -s tests -v
 2. **Gate 實際測速校正。** 現有穿越插值與像素車道差只輸出預估均速。下一步須確認現地標線規格並量測 Gate 真實間距，取代按序號推定的 `station_m`；用已知道路平面對應點建立 homography，把接地點映射至公尺座標，對彎道各車道計算曲線弧長；最後以人工標註與參考測速設備驗證低幀率、遮擋、跳幀、ID 中斷及鏡頭晃動下的誤差。不能把預填的 10 公尺直接當成現地量測結果。
 3. **雲端即時多鏡頭。** 先定義手機、攝影機到伺服器的串流協定與連線需求，再將目前單一來源的擷取、模型處理、校正設定及狀態拆成每個鏡頭各自獨立的工作單元。增加串流重連、資源限制、身分驗證與鏡頭管理 API，網頁再呈現多來源畫面及事件；先以兩路以上的測試串流驗證隔離與延遲，之後才進行遠端部署。
 4. **可靠性與量化驗證。** 補齊 Stage-5 的資料來源清單、標籤映射、訓練設定及可重現的分割指標；為車流計數、紅燈提示、變道和未來的測速建立人工標註真值與評估方式。使用白天、夜間、雨天、遮擋及鏡頭晃動影像檢查誤報、漏報與延遲，並記錄 Windows、macOS 及 CPU／CUDA／MPS 的實際測試結果。`result/lanenet/` 目前只有精選視覺對照圖，不能據此宣稱量化準確率。
-5. **執行入口符合版本規範。** 現有 `start.command`、`start.bat` 仍會尋找虛擬環境。後續需移除啟動腳本的環境搜尋，改為檢查並呼叫 Python 3.12.x，再於 Windows、macOS 各實際啟動與驗證。完成前應依本文件及 `README.md` 明確指定 3.12.x 的命令執行，不使用上述舊啟動腳本。
+5. **啟動腳本的實機驗證。** `start.command`、`start.bat` 已改為檢查並呼叫 Python 3.12.x，`start-virtual-camera.bat` 使用自動裝置選擇。仍須在 macOS、Windows 分別以可用影片或攝影機實際啟動，檢查瀏覽器開啟、來源選取及關閉流程。
 
 ## 程式風格與協作交付
 

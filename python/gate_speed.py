@@ -114,6 +114,7 @@ class GateSpeedEstimator:
         frame_size: tuple[int, int],
         road_boundaries: dict | None = None,
         max_track_gap_frames: int = 5,
+        max_track_gap_seconds: float = 2.0,
     ) -> None:
         width, height = frame_size
         self.gates = [
@@ -125,8 +126,18 @@ class GateSpeedEstimator:
             )
             for item in saved_gates
         ]
+        self.gate_bounds = [
+            (
+                min(gate.left[0], gate.right[0]),
+                max(gate.left[0], gate.right[0]),
+                min(gate.left[1], gate.right[1]),
+                max(gate.left[1], gate.right[1]),
+            )
+            for gate in self.gates
+        ]
         self.lane_count = int(saved_gates[0]["lane"]) if saved_gates else 1
         self.max_track_gap_frames = max_track_gap_frames
+        self.max_track_gap_seconds = max_track_gap_seconds
         self.tracks: dict[int, TrackState] = {}
         self.boundaries = None
         if road_boundaries and all(road_boundaries.get(side) for side in ("L", "R")):
@@ -193,14 +204,24 @@ class GateSpeedEstimator:
         previous_frame = track.last_frame
         if previous is not None and previous_time is not None and previous_frame is not None:
             frame_gap = frame_number - previous_frame
-            if frame_gap <= 0 or frame_gap > self.max_track_gap_frames or timestamp_s <= previous_time:
+            if (
+                frame_gap <= 0
+                or frame_gap > self.max_track_gap_frames
+                or timestamp_s <= previous_time
+                or timestamp_s - previous_time > self.max_track_gap_seconds
+            ):
                 track.last_crossing = None
                 track.crossed_gates.clear()
                 track.latest = None
             else:
                 hits = []
+                min_x, max_x = sorted((previous[0], point[0]))
+                min_y, max_y = sorted((previous[1], point[1]))
                 for index, gate in enumerate(self.gates):
                     if index in track.crossed_gates:
+                        continue
+                    left, right, top, bottom = self.gate_bounds[index]
+                    if max_x < left or min_x > right or max_y < top or min_y > bottom:
                         continue
                     intersection = segment_intersection(previous, point, gate.left, gate.right)
                     if intersection is not None:
