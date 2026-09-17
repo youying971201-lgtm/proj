@@ -21,7 +21,7 @@ os.environ.setdefault("YOLO_CONFIG_DIR", str(_DEFAULT_YOLO_CONFIG_DIR))
 from ultralytics import YOLO
 
 from Car import Vehicle
-from road_marking import RoadMarkingDetector
+from road_marking import RoadMarkingDetector, draw_road_markings
 from trafficLight import TrafficLightDetector
 from video_source import CAMERA_BACKENDS, list_available_cameras, open_video_capture
 
@@ -51,8 +51,8 @@ DEVICE = None #顯示裝置
 # YOLO11 COCO 類別：car=2、motorcycle=3、bus=5、truck=7、traffic light=9。
 CLASSES_TO_DETECT = [2, 3, 5, 7, 9]
 VEHICLE_CLASSES = {2, 3, 5, 7}
-MPS_IMAGE_SIZE = 960  # M2 Air GPU 上兼顧偵測品質與長時間運行溫度／速度。
-CPU_IMAGE_SIZE = 640  # MPS 暫時不可用時，避免 YOLO11s 在 CPU 上過度延遲。
+MPS_IMAGE_SIZE = 640  # M2 Air GPU 上兼顧偵測品質與長時間運行溫度／速度。
+CPU_IMAGE_SIZE = 512  # MPS 暫時不可用時，避免 YOLO11s 在 CPU 上過度延遲。
 TRACK_TTL_FRAMES = 90
 DEBUG = True
 LINE_DEAD_ZONE_PIXELS = 12
@@ -384,11 +384,63 @@ def resolve_device(requested_device):
     return requested_device
 
 
+def resolve_road_marking_device(selected_device):
+    """Stage-5 避開可能不支援的 MPS 算子；CUDA 與 CPU 維持原選擇。"""
+    return "cpu" if selected_device == "mps" else selected_device
+
+
+def reload_road_markings(frame, checkpoint_path, device, max_side):
+    """只在操作員要求時載入 Stage-5，對當前影格推論一次後釋放模型。"""
+    detector = RoadMarkingDetector(
+        checkpoint_path=checkpoint_path,
+        device=device,
+        max_side=max_side,
+    )
+    try:
+        return detector.predict(frame)
+    finally:
+        del detector
+        if device == "cuda":
+            torch.cuda.empty_cache()
+
+
+def road_markings_for_frame(frame, frame_count, checkpoint_path, device, max_side):
+    """只處理一次待執行的 Reload；其餘影格直接沿用上次結果。"""
+    with line_lock:
+        cached_result = getattr(app.state, "road_marking_result", None)
+        reload_requested = getattr(app.state, "road_marking_reload_requested", False)
+        if reload_requested:
+            app.state.road_marking_reload_requested = False
+    if not reload_requested or checkpoint_path is None:
+        return cached_result
+
+    try:
+        new_result = reload_road_markings(frame, checkpoint_path, device, max_side)
+    except Exception as error:
+        message = f"Stage-5 重新偵測失敗：{type(error).__name__}: {error}"
+        print(message)
+        with line_lock:
+            road_marking_status.update(state="error", message=message)
+        return cached_result
+
+    with line_lock:
+        app.state.road_marking_result = new_result
+        road_marking_status.update(
+            enabled=True,
+            state="ready",
+            message=(
+                f"Stage-5 已重新偵測（{device}，"
+                f"{new_result.inference_ms:.0f} ms）；標線持續顯示"
+            ),
+            result=new_result.as_dict(frame_count),
+        )
+    return new_result
+
+
 def run_monitor(
     graphic_device,
     model_path,
     road_model_path,
-    road_marking_every,
     road_marking_max_side,
     road_marking_opacity,
     video_source,
@@ -435,42 +487,11 @@ def run_monitor(
         frame_broadcaster.finish()
         return
 
-    road_detector = None
-    if road_model_path is not None:
-        resolved_road_model_path = Path(road_model_path).expanduser().resolve()
-        with line_lock:
-            road_marking_status.update(
-                enabled=True,
-                state="loading",
-                message=f"正在載入 Stage-5：{resolved_road_model_path.name}",
-                result=None,
-            )
-        try:
-            road_detector = RoadMarkingDetector(
-                checkpoint_path=resolved_road_model_path,
-                device=selected_device,
-                max_side=road_marking_max_side,
-            )
-        except Exception as error:
-            message = f"道路標線模型停用：{type(error).__name__}: {error}"
-            print(message)
-            with line_lock:
-                road_marking_status.update(
-                    enabled=False,
-                    state="error",
-                    message=message,
-                    result=None,
-                )
-        else:
-            message = f"Stage-5 已載入：{resolved_road_model_path.name}"
-            print(message)
-            with line_lock:
-                road_marking_status.update(
-                    enabled=True,
-                    state="ready",
-                    message=message,
-                    result=None,
-                )
+    resolved_road_model_path = (
+        Path(road_model_path).expanduser().resolve()
+        if road_model_path is not None else None
+    )
+    road_device = resolve_road_marking_device(selected_device)
     cap = open_video_capture(
         video_source,
         camera_backend,
@@ -566,8 +587,19 @@ def run_monitor(
     previous_gray = None
     camera_motion = 0.0
     camera_motion_inlier_ratio = 0.0
-    latest_road_result = None
-    latest_road_result_frame = None
+    with line_lock:
+        latest_road_result = getattr(app.state, "road_marking_result", None)
+        if (
+            latest_road_result is not None
+            and latest_road_result.class_map.shape != (height, width)
+        ):
+            latest_road_result = None
+            app.state.road_marking_result = None
+            road_marking_status.update(
+                state="idle",
+                message="畫面尺寸已變更，請按 Reload LaneNet 重新偵測標線",
+                result=None,
+            )
 
     
 
@@ -618,38 +650,16 @@ def run_monitor(
             imgsz=image_size,
         )[0]
 
-        if road_detector is not None and (
-            latest_road_result is None
-            or (frame_count - start_frame - 1) % road_marking_every == 0
-        ):
-            try:
-                latest_road_result = road_detector.predict(inference_frame)
-                latest_road_result_frame = frame_count
-                with line_lock:
-                    road_marking_status.update(
-                        enabled=True,
-                        state="running",
-                        message=(
-                            "Stage-5 道路標線辨識中，"
-                            f"本次 {latest_road_result.inference_ms:.0f} ms"
-                        ),
-                        result=latest_road_result.as_dict(frame_count),
-                    )
-            except Exception as error:
-                message = f"道路標線推論已停用：{type(error).__name__}: {error}"
-                print(message)
-                with line_lock:
-                    road_marking_status.update(
-                        enabled=False,
-                        state="error",
-                        message=message,
-                        result=None,
-                    )
-                road_detector = None
-                latest_road_result = None
+        latest_road_result = road_markings_for_frame(
+            inference_frame,
+            frame_count,
+            resolved_road_model_path,
+            road_device,
+            road_marking_max_side,
+        )
 
-        if road_detector is not None and latest_road_result is not None:
-            frame = road_detector.draw(
+        if latest_road_result is not None:
+            frame = draw_road_markings(
                 frame,
                 latest_road_result,
                 opacity=road_marking_opacity,
@@ -829,12 +839,11 @@ def run_monitor(
                 2,
             )
             if latest_road_result is not None:
-                road_age = frame_count - latest_road_result_frame
                 cv2.putText(
                     frame,
                     (
                         f"Stage-5: {latest_road_result.inference_ms:.0f}ms | "
-                        f"markings: {len(latest_road_result.objects)} | age: {road_age}f"
+                        f"markings: {len(latest_road_result.objects)} | cached"
                     ),
                     (10, 160),
                     cv2.FONT_HERSHEY_SIMPLEX,
@@ -846,7 +855,14 @@ def run_monitor(
         frame_broadcaster.publish(frame)
 
     cap.release()
-    app.state.processing_started = False 
+    with line_lock:
+        app.state.processing_started = False
+        if getattr(app.state, "road_marking_reload_requested", False):
+            app.state.road_marking_reload_requested = False
+            road_marking_status.update(
+                state="error",
+                message="影片已結束，Reload LaneNet 未執行",
+            )
 
     if getattr(app.state, "cancel_requested", False):
         print("收到重置訊號，影片處理已中斷。")
@@ -894,6 +910,7 @@ def status():
     with line_lock:
         return {
             **runtime_status,
+            "processing_started": getattr(app.state, "processing_started", False),
             "road_markings": {
                 key: value
                 for key, value in road_marking_status.items()
@@ -907,9 +924,27 @@ def status():
 
 @app.get("/api/road_markings")
 def road_markings():
-    """回傳 Stage-5 最新辨識結果；同時含像素與 0~1 正規化座標。"""
+    """回傳最近一次 Reload 的固定標線；同時含像素與 0~1 正規化座標。"""
     with line_lock:
         return dict(road_marking_status)
+
+
+@app.post("/api/reload_lanenet")
+def request_lanenet_reload():
+    """排程在下一張影格載入 Stage-5 並重新偵測一次。"""
+    with line_lock:
+        if getattr(app.state, "road_model_path", None) is None:
+            raise HTTPException(status_code=409, detail="Stage-5 已停用")
+        if not getattr(app.state, "processing_started", False):
+            raise HTTPException(status_code=409, detail="請先開始判斷")
+        if road_marking_status["state"] == "loading":
+            raise HTTPException(status_code=409, detail="Stage-5 正在重新偵測")
+        app.state.road_marking_reload_requested = True
+        road_marking_status.update(
+            state="loading",
+            message="等待下一張影格，準備重新載入 Stage-5",
+        )
+    return {"status": "queued", "message": "Stage-5 重新偵測已排程"}
 
 
 def video_config_for_response():
@@ -997,6 +1032,13 @@ def reset_processing():
     
     # 狀態重置，準備下一次啟動
     app.state.cancel_requested = False
+    with line_lock:
+        if getattr(app.state, "road_marking_reload_requested", False):
+            app.state.road_marking_reload_requested = False
+            road_marking_status.update(
+                state="error",
+                message="Reload LaneNet 已取消；保留上次標線",
+            )
     frame_broadcaster._finished = False
     with frame_broadcaster._condition:
         frame_broadcaster._sequence += 1
@@ -1068,12 +1110,6 @@ def main():
         help="只執行原本的 YOLO，不載入 Stage-5",
     )
     parser.add_argument(
-        "--road-marking-every",
-        type=int,
-        default=1,
-        help="每幾幀執行一次道路標線推論；RTX 4050 建議 1~3",
-    )
-    parser.add_argument(
         "--road-marking-max-side",
         type=int,
         default=1280,
@@ -1112,8 +1148,6 @@ def main():
         option_value = getattr(args, option_name)
         if option_value is not None and option_value <= 0:
             parser.error(f"--{option_name.replace('_', '-')} 必須大於 0")
-    if args.road_marking_every < 1:
-        parser.error("--road-marking-every 必須至少為 1")
     if not 0.0 <= args.road_marking_opacity <= 1.0:
         parser.error("--road-marking-opacity 必須介於 0 和 1")
 
@@ -1129,6 +1163,19 @@ def main():
         )
 
     app.state.source_name = source_name
+    app.state.road_model_path = None if args.no_road_markings else args.road_model
+    app.state.road_marking_reload_requested = False
+    app.state.road_marking_result = None
+    with line_lock:
+        road_marking_status.update(
+            enabled=not args.no_road_markings,
+            state="disabled" if args.no_road_markings else "idle",
+            message=(
+                "Stage-5 已停用" if args.no_road_markings
+                else "按 Reload LaneNet 偵測一次道路標線"
+            ),
+            result=None,
+        )
 
     def monitor_worker():
         try:
@@ -1136,7 +1183,6 @@ def main():
                 args.device,
                 args.model,
                 None if args.no_road_markings else args.road_model,
-                args.road_marking_every,
                 args.road_marking_max_side,
                 args.road_marking_opacity,
                 video_source,
@@ -1152,6 +1198,15 @@ def main():
             print(message)
             set_runtime_status("error", message)
             frame_broadcaster.finish()
+        finally:
+            with line_lock:
+                app.state.processing_started = False
+                app.state.road_marking_reload_requested = False
+                if road_marking_status["state"] == "loading":
+                    road_marking_status.update(
+                        state="error",
+                        message="影片處理已停止，Reload LaneNet 未完成",
+                    )
 
     app.state.monitor_worker = monitor_worker
     app.state.processing_started = False
@@ -1178,4 +1233,3 @@ async def shutdown_server():
 
 if __name__ == "__main__":
     main()
-
