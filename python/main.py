@@ -1,9 +1,11 @@
 import argparse
 import json
+import math
 import os
+import signal
 from pathlib import Path
 from threading import Condition, Lock, Thread
-from time import perf_counter, sleep
+from time import perf_counter
 
 import cv2
 import numpy as np
@@ -21,38 +23,32 @@ os.environ.setdefault("YOLO_CONFIG_DIR", str(_DEFAULT_YOLO_CONFIG_DIR))
 from ultralytics import YOLO
 
 from Car import Vehicle
+from gate_speed import GateSpeedEstimator, segment_intersection
 from road_marking import RoadMarkingDetector, draw_road_markings
 from trafficLight import TrafficLightDetector
 from video_source import CAMERA_BACKENDS, list_available_cameras, open_video_capture
-
-import os
-import signal
-import threading
-import time
-
 
 # 基本設定
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 # 影像來源預設值：改成 "camera" 使用攝影機，改成 "video" 使用下方影片。
 DEFAULT_INPUT_MODE = "video"
-DEFAULT_VIDEO_NAME = "IMG_6898.MOV"
+DEFAULT_VIDEO_NAME = "newVid.MOV"
 DEFAULT_CAMERA_INDEX = 1
 DEFAULT_CAMERA_WIDTH = 1280
 DEFAULT_CAMERA_HEIGHT = 720
 DEFAULT_CAMERA_FPS = 30.0
-# 預設使用 COCO 預訓練的 YOLO11s。第一次啟動會由 Ultralytics 自動下載。
+# 預設使用 COCO 預訓練的 YOLO11x。第一次啟動會由 Ultralytics 自動下載。
 MODEL_PATH = "yolo11x.pt"
 ROAD_MARKING_MODEL_PATH = (
     PROJECT_ROOT / "models" / "road_marking" / "stage5_roadmark_best.pth"
 )
 START_TIME_SECONDS = 0.0 #影片開始時間
 END_TIME_SECONDS = None # 影片結束時間
-DEVICE = None #顯示裝置
 # YOLO11 COCO 類別：car=2、motorcycle=3、bus=5、truck=7、traffic light=9。
 CLASSES_TO_DETECT = [2, 3, 5, 7, 9]
 VEHICLE_CLASSES = {2, 3, 5, 7}
 MPS_IMAGE_SIZE = 640  # M2 Air GPU 上兼顧偵測品質與長時間運行溫度／速度。
-CPU_IMAGE_SIZE = 512  # MPS 暫時不可用時，避免 YOLO11s 在 CPU 上過度延遲。
+CPU_IMAGE_SIZE = 512  # CPU／CUDA 共用；CPU 上避免 YOLO11x 過度延遲。
 TRACK_TTL_FRAMES = 90
 DEBUG = True
 LINE_DEAD_ZONE_PIXELS = 12
@@ -113,9 +109,75 @@ class FrameBroadcaster:
             self._finished = True
             self._condition.notify_all()
 
+    def reset(self):
+        with self._condition:
+            self._finished = False
+            self._sequence += 1
+            self._condition.notify_all()
+
     def latest_frame(self):
         with self._condition:
             return self._frame
+
+
+class FallbackVehicleTracker:
+    """ByteTrack 暫無 ID 時，用相鄰影格的框延續短期車輛身分。"""
+
+    def __init__(self, max_gap_frames=5):
+        self.max_gap_frames = max_gap_frames
+        self.next_id = -1
+        self.tracks = {}
+
+    @staticmethod
+    def _match_score(previous, current):
+        x1 = max(previous[0], current[0])
+        y1 = max(previous[1], current[1])
+        x2 = min(previous[2], current[2])
+        y2 = min(previous[3], current[3])
+        overlap = max(0, x2 - x1) * max(0, y2 - y1)
+        first_area = max(0, previous[2] - previous[0]) * max(0, previous[3] - previous[1])
+        second_area = max(0, current[2] - current[0]) * max(0, current[3] - current[1])
+        union = first_area + second_area - overlap
+        iou = overlap / union if union > 0 else 0.0
+        first_center = ((previous[0] + previous[2]) / 2, previous[3])
+        second_center = ((current[0] + current[2]) / 2, current[3])
+        distance = math.hypot(
+            first_center[0] - second_center[0],
+            first_center[1] - second_center[1],
+        )
+        scale = max(
+            previous[2] - previous[0], previous[3] - previous[1],
+            current[2] - current[0], current[3] - current[1], 1,
+        )
+        if iou < 0.1 and distance > 0.6 * scale:
+            return None
+        return iou - 0.2 * distance / scale
+
+    def assign(self, boxes, frame_number):
+        self.tracks = {
+            track_id: (box, seen)
+            for track_id, (box, seen) in self.tracks.items()
+            if frame_number - seen <= self.max_gap_frames
+        }
+        used = set()
+        assigned = []
+        for box in boxes:
+            best = None
+            for track_id, (previous, _) in self.tracks.items():
+                if track_id in used:
+                    continue
+                score = self._match_score(previous, box)
+                if score is not None and (best is None or score > best[0]):
+                    best = score, track_id
+            if best is None:
+                track_id = self.next_id
+                self.next_id -= 1
+            else:
+                track_id = best[1]
+            used.add(track_id)
+            self.tracks[track_id] = (tuple(box), frame_number)
+            assigned.append(track_id)
+        return assigned
 
 
 frame_broadcaster = FrameBroadcaster()
@@ -129,23 +191,19 @@ road_marking_status = {
 }
 
 # in_transition 表示「線的哪一側移動到哪一側」算 IN，其反向則算 OUT。
-# playback_speed=播放速度
 VIDEO_CONFIGS = {
     # day_green_normal.mp4（1920x1080）：車輛由遠方向鏡頭靠近，使用橫線。
     "day_green_normal.mp4": {
         "line": ((280, 650), (1120, 650)),
         "in_transition": (-1, 1),  # 畫面上方 -> 下方為 IN
-        "playback_speed": 1.0,
     },
     "day_intersection_multi_car.mp4": {
         "line": ((420, 875), (1840, 875)),
         "in_transition": (-1, 1),  # 畫面上方 -> 下方為 IN
-        "playback_speed": 1.0,
     },
     "night_red_stop.mp4": {
         "line": ((640, 345), (640, 650)),
         "in_transition": (1, -1),  # 畫面左側 -> 右側為 IN
-        "playback_speed": 0.25,
     },
 }
 
@@ -251,7 +309,6 @@ def get_video_config(video_name, width, height):
         return {
             "line": ((round(width * 0.15), line_y), (round(width * 0.85), line_y)),
             "in_transition": (-1, 1),
-            "playback_speed": 1.0,
         }
 
     config = VIDEO_CONFIGS[video_name]
@@ -278,37 +335,31 @@ def get_line_side(point, line_start, line_end):
         return 0
     return 1 if signed_distance > 0 else -1
 
-#確認車輛中心投影落在線段範圍內，避免在延伸線上被錯誤計數。
-def point_is_within_line_span(point, line_start, line_end):
-    px, py = point
-    x1, y1 = line_start
-    x2, y2 = line_end
-    dx, dy = x2 - x1, y2 - y1
-    length_squared = max(dx * dx + dy * dy, 1)
-    projection = ((px - x1) * dx + (py - y1) * dy) / length_squared
-    return 0.0 <= projection <= 1.0
-
 def detect_crossing(vehicle, center, config):
-    """依車輛中心跨越線段前後的側別判斷 IN／OUT，並以防抖區避免重複觸發。"""
+    """用接地點軌跡與有限停止線相交來判斷 IN／OUT。"""
     line_start, line_end = config["line"]
     current_side = get_line_side(center, line_start, line_end)
     if current_side == 0:
         return None
     if vehicle.line_side is None:
         vehicle.line_side = current_side
+        vehicle.line_side_point = center
         return None
     if current_side == vehicle.line_side:
+        vehicle.line_side_point = center
         return None
 
     previous_side = vehicle.line_side
+    previous_point = vehicle.line_side_point or vehicle.last_center
     vehicle.line_side = current_side
-    if not point_is_within_line_span(center, line_start, line_end):
+    vehicle.line_side_point = center
+    if segment_intersection(previous_point, center, line_start, line_end) is None:
         return None
     transition = (previous_side, current_side)
     return "IN" if transition == config["in_transition"] else "OUT"
 
 
-def load_saved_line(default_line):
+def load_saved_line(default_line, frame_size):
     """讀取網頁上一次儲存的兩點；檔案不存在或格式錯誤時使用預設值。"""
     if not POINTS_FILE.exists():
         return default_line
@@ -322,7 +373,14 @@ def load_saved_line(default_line):
             points = saved["points"]
         if len(points) != 2:
             raise ValueError("停止線必須剛好有兩個端點")
-        return tuple((int(point["x"]), int(point["y"])) for point in points)
+        width, height = frame_size
+        normalized = saved.get("video", {}).get("coordinate_system") == "normalized_0_to_1"
+        if normalized:
+            return tuple((
+                round(float(point["x"]) * (width - 1)),
+                round(float(point["y"]) * (height - 1)),
+            ) for point in points)
+        return tuple((round(float(point["x"])), round(float(point["y"]))) for point in points)
     except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as error:
         print(f"無法讀取 {POINTS_FILE}，改用預設計數線：{error}")
         return default_line
@@ -354,12 +412,13 @@ def prepare_configuration_frame(
         return
     height, width = frame.shape[:2]
     config = get_video_config(source_name, width, height)
-    stop_line = load_saved_line(config["line"])
+    stop_line = load_saved_line(config["line"], (width, height))
     with line_lock:
         app.state.frame_size = (width, height)
         app.state.video_config = {**config, "line": stop_line}
         app.state.stop_line = [{"x": x, "y": y} for x, y in stop_line]
         app.state.gates = []
+        app.state.road_boundaries = None
     frame_broadcaster.publish(frame)
     set_runtime_status("configuring", "請標示停止線與至少三個 Gate，再按開始判斷")
 
@@ -370,16 +429,18 @@ def set_runtime_status(state, message):
 
 
 def resolve_device(requested_device):
-    """在 Apple Silicon 優先採用 MPS，無法使用時安全回退到 CPU。"""
+    """依實際可用加速裝置選擇 YOLO 推論，否則使用 CPU。"""
     if requested_device == "auto":
+        if torch.cuda.is_available():
+            return "cuda"
         if torch.backends.mps.is_available():
             return "mps"
-        elif torch.cuda.is_available():
-            return "cuda"
-        print("MPS 目前不可用，改用 CPU。可用 `python -c` 檢查 torch.backends.mps.is_available()。")
         return "cpu"
     if requested_device == "mps" and not torch.backends.mps.is_available():
         print("要求使用 MPS，但目前不可用；改用 CPU。")
+        return "cpu"
+    if requested_device == "cuda" and not torch.cuda.is_available():
+        print("要求使用 CUDA，但目前不可用；改用 CPU。")
         return "cpu"
     return requested_device
 
@@ -530,7 +591,9 @@ def run_monitor(
         video_duration = None
         start_frame = 0
         end_frame = 0
+        pending_frame = frame
     else:
+        pending_frame = None
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         video_duration = total_frames / fps if total_frames > 0 else None
         if video_duration is not None and START_TIME_SECONDS >= video_duration:
@@ -564,16 +627,20 @@ def run_monitor(
             (round(point["x"] * (width - 1)), round(point["y"] * (height - 1)))
             for point in app.state.stop_line
         )
+        speed_gates = [dict(gate) for gate in app.state.gates]
+        speed_boundaries = getattr(app.state, "road_boundaries", None)
     line_start, line_end = video_config["line"]
-    playback_speed = video_config["playback_speed"]
     print(f"Counting line for {source_name}: start={line_start}, end={line_end}")
-    print(f"Playback speed: {playback_speed:.0%}")
     light_detector = TrafficLightDetector()
+    speed_estimator = GateSpeedEstimator(
+        speed_gates, (width, height), speed_boundaries,
+        stop_line=video_config["line"],
+    )
 
     vehicles = {}
+    fallback_tracker = FallbackVehicleTracker()
     total_vehicle_ids = set()
     illegal_vehicle_ids = set()
-    crossing_events = []
     direction_counts = {"IN": 0, "OUT": 0}
     # frame_count 保留原始影片中的影格編號，方便回查違規發生位置。
     frame_count = start_frame
@@ -583,6 +650,7 @@ def run_monitor(
     green_ratio = 0.0
     previous_light_state = "UNKNOWN"
     previous_time = perf_counter()
+    last_video_timestamp = None
     smoothed_fps = 0.0
     previous_gray = None
     camera_motion = 0.0
@@ -609,7 +677,6 @@ def run_monitor(
     while cap.isOpened():
         if getattr(app.state, "cancel_requested", False):
             break
-        frame_started_at = perf_counter()
         # 結束時間採不包含上限的區間，例如 5~10 秒不會處理第 10 秒的影格。
         if (
             not is_live_source
@@ -617,14 +684,31 @@ def run_monitor(
             and int(cap.get(cv2.CAP_PROP_POS_FRAMES)) >= end_frame
         ):
             break
-        ret, frame = cap.read()
+        if pending_frame is not None:
+            ret, frame = True, pending_frame
+            pending_frame = None
+        else:
+            ret, frame = cap.read()
         if not ret:
             if is_live_source:
-                print(f"攝影機畫面中斷，準備重新連線：{source_name}")
-                cap.release()
-                continue
+                print(f"攝影機畫面中斷，停止處理：{source_name}")
             break
         frame_count += 1
+        if is_live_source:
+            frame_timestamp = perf_counter()
+        else:
+            capture_timestamp = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
+            fallback_timestamp = frame_count / fps
+            frame_timestamp = (
+                capture_timestamp
+                if math.isfinite(capture_timestamp)
+                and capture_timestamp > 0
+                and (last_video_timestamp is None or capture_timestamp > last_video_timestamp)
+                else fallback_timestamp
+            )
+            if last_video_timestamp is not None and frame_timestamp <= last_video_timestamp:
+                frame_timestamp = last_video_timestamp + 1.0 / fps
+            last_video_timestamp = frame_timestamp
 
         current_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         (
@@ -640,8 +724,6 @@ def run_monitor(
             "classes": CLASSES_TO_DETECT,
             "verbose": False,
         }
-        if DEVICE is not None:
-            track_options["device"] = DEVICE
         inference_frame = frame
         result = model.track(
             inference_frame,
@@ -665,130 +747,155 @@ def run_monitor(
                 opacity=road_marking_opacity,
             )
 
+        for gate in speed_estimator.gates:
+            left = tuple(round(value) for value in gate.left)
+            right = tuple(round(value) for value in gate.right)
+            cv2.line(frame, left, right, (255, 220, 0), 1)
+            cv2.putText(
+                frame, gate.name, (left[0] + 3, max(left[1] - 4, 12)),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 220, 0), 1,
+            )
+
+        boxes = result.boxes.xyxy.cpu().numpy().astype(int)
+        classes = result.boxes.cls.cpu().numpy().astype(int)
+        confidences = result.boxes.conf.cpu().numpy()
+        light_box = choose_traffic_light(boxes, classes, confidences)
+        if light_box is not None:
+            roi, (x1, y1, x2, y2) = safe_roi(inference_frame, light_box)
+            (
+                traffic_light_state,
+                traffic_light_color,
+                red_ratio,
+                green_ratio,
+            ) = light_detector.update(roi)
+            cv2.rectangle(frame, (x1, y1), (x2, y2), traffic_light_color, 3)
+            cv2.putText(
+                frame,
+                traffic_light_state,
+                (x1, max(y1 - 10, 20)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                traffic_light_color,
+                2,
+            )
+
+        if traffic_light_state != previous_light_state:
+            print(
+                f"Frame {frame_count}: light "
+                f"{previous_light_state} -> {traffic_light_state}"
+            )
+            previous_light_state = traffic_light_state
+
+        vehicle_indices = [
+            index for index, class_id in enumerate(classes)
+            if class_id in VEHICLE_CLASSES
+        ]
+        vehicle_boxes = [boxes[index] for index in vehicle_indices]
         if result.boxes.id is not None:
-            boxes = result.boxes.xyxy.cpu().numpy().astype(int)
-            ids = result.boxes.id.cpu().numpy().astype(int)
-            classes = result.boxes.cls.cpu().numpy().astype(int)
-            confidences = result.boxes.conf.cpu().numpy()
+            all_ids = result.boxes.id.cpu().numpy().astype(int)
+            vehicle_ids = [int(all_ids[index]) for index in vehicle_indices]
+        else:
+            vehicle_ids = [-1] * len(vehicle_boxes)
+        missing_indices = [
+            index for index, track_id in enumerate(vehicle_ids) if track_id < 0
+        ]
+        temporary_ids = fallback_tracker.assign(
+            [vehicle_boxes[index] for index in missing_indices], frame_count
+        )
+        for index, temporary_id in zip(missing_indices, temporary_ids):
+            vehicle_ids[index] = temporary_id
 
-            light_box = choose_traffic_light(boxes, classes, confidences)
-            if light_box is not None:
-                roi, (x1, y1, x2, y2) = safe_roi(inference_frame, light_box)
-                (
-                    traffic_light_state,
-                    traffic_light_color,
-                    red_ratio,
-                    green_ratio,
-                ) = light_detector.update(roi)
-                cv2.rectangle(frame, (x1, y1), (x2, y2), traffic_light_color, 3)
-                cv2.putText(
-                    frame,
-                    traffic_light_state,
-                    (x1, max(y1 - 10, 20)),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.7,
-                    traffic_light_color,
-                    2,
+        for box, track_id in zip(vehicle_boxes, vehicle_ids):
+            x1, y1, x2, y2 = box
+            center = ((x1 + x2) // 2, y2)
+            has_tracker_id = track_id >= 0
+            if has_tracker_id:
+                total_vehicle_ids.add(track_id)
+            if track_id not in vehicles:
+                vehicles[track_id] = Vehicle(
+                    track_id=track_id,
+                    last_center=center,
+                    first_seen_frame=frame_count,
+                    last_seen_frame=frame_count,
                 )
+            vehicle = vehicles[track_id]
 
-            if traffic_light_state != previous_light_state:
-                print(
-                    f"Frame {frame_count}: light "
-                    f"{previous_light_state} -> {traffic_light_state}"
+            if has_tracker_id:
+                direction = detect_crossing(vehicle, center, video_config)
+                if direction == "IN" and vehicle.crossed_in:
+                    direction = None
+                elif direction == "OUT" and vehicle.crossed_out:
+                    direction = None
+                if direction:
+                    is_new_violation = vehicle.mark_crossing(
+                        direction, traffic_light_state
+                    )
+                    direction_counts[direction] += 1
+                    print(
+                        f"Frame {frame_count}: vehicle {track_id} crossed "
+                        f"{direction}, light={traffic_light_state}"
+                    )
+                    if is_new_violation:
+                        illegal_vehicle_ids.add(track_id)
+                        print(f"  -> violation: vehicle {track_id}")
+
+            vehicle.update_position(
+                center,
+                frame_count,
+                MOTION_STOP_THRESHOLD,
+                MOTION_MOVING_THRESHOLD,
+                MOTION_CONFIRM_FRAMES,
+                MOTION_SMOOTHING_ALPHA,
+                camera_transform,
+            )
+            speed_estimate = speed_estimator.update(
+                track_id, center, frame_timestamp, frame_count
+            )
+            color = (
+                (0, 0, 255) if vehicle.illegal else
+                (255, 0, 0) if vehicle.motion_state == "STOPPED" else
+                (0, 255, 0)
+            )
+            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+            cv2.circle(frame, center, 5, (255, 0, 0), -1)
+            speed_y = max(y1 - 10, 22)
+            label_y = max(speed_y - 20, 18)
+            if has_tracker_id:
+                label = "ILLEGAL" if vehicle.illegal else "OK"
+                identity = f"ID:{track_id} {label}"
+            else:
+                identity = f"TEMP:{-track_id}"
+            cv2.putText(
+                frame,
+                f"{identity} {vehicle.motion_state} {vehicle.cross_direction or ''}",
+                (x1, label_y),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1,
+            )
+            if speed_estimate is None:
+                speed_label = "EST -- km/h"
+            else:
+                estimate_source = "" if speed_estimate.lane_adjusted else " base"
+                estimate_kind = "AVG" if speed_estimate.method == "gate" else "LIVE"
+                speed_label = (
+                    f"EST {estimate_kind} {speed_estimate.kmh:.1f} km/h "
+                    f"(L{speed_estimate.lane_number}{estimate_source})"
                 )
-                previous_light_state = traffic_light_state
-
-            vehicle_boxes = []
-            vehicle_ids = []
-            vehicle_classes = []
-            vehicle_confidences = []
-
-            for box, track_id, class_id, confidence in zip(
-                boxes, ids, classes, confidences
-            ):
-                if class_id not in VEHICLE_CLASSES:
-                    continue
-                x1, y1, x2, y2 = box
-                center = ((x1 + x2) // 2, (y1 + y2) // 2)
-                vehicle_boxes.append(box)
-                vehicle_ids.append(track_id)
-                vehicle_classes.append(class_id)
-                vehicle_confidences.append(confidence)
-                total_vehicle_ids.add(int(track_id))
-
-                if track_id not in vehicles:
-                    vehicles[track_id] = Vehicle(
-                        track_id=track_id,
-                        last_center=center,
-                        first_seen_frame=frame_count,
-                        last_seen_frame=frame_count,
-                    )
-
-            if vehicle_boxes:
-                for index, track_id in enumerate(vehicle_ids):
-                    vehicle = vehicles[track_id]
-                    x1, y1, x2, y2 = vehicle_boxes[index]
-                    center = ((x1 + x2) // 2, y2)
-                    with line_lock:
-                        active_config = dict(video_config)
-                    direction = detect_crossing(vehicle, center, active_config)
-                    if direction == "IN" and vehicle.crossed_in:
-                        direction = None
-                    elif direction == "OUT" and vehicle.crossed_out:
-                        direction = None
-
-                    if direction:
-                        is_new_violation = vehicle.mark_crossing(
-                            direction, traffic_light_state
-                        )
-                        crossing_events.append(
-                            (frame_count, int(track_id), direction, traffic_light_state)
-                        )
-                        direction_counts[direction] += 1
-                        print(
-                            f"Frame {frame_count}: vehicle {track_id} crossed "
-                            f"{direction}, light={traffic_light_state}"
-                        )
-                        if is_new_violation:
-                            illegal_vehicle_ids.add(int(track_id))
-                            print(f"  -> violation: vehicle {track_id}")
-
-                    color = (0, 0, 255) if vehicle.illegal else (0, 255, 0)
-                    label = "ILLEGAL" if vehicle.illegal else "OK"
-                    vehicle.update_position(
-                        center,
-                        frame_count,
-                        MOTION_STOP_THRESHOLD,
-                        MOTION_MOVING_THRESHOLD,
-                        MOTION_CONFIRM_FRAMES,
-                        MOTION_SMOOTHING_ALPHA,
-                        camera_transform,
-                    )
-                    if vehicle.motion_state == "STOPPED":
-                        color = (255,0,0)
-                    else:
-                        color = (0,255,0)
-                    cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-                    cv2.circle(frame, center, 5, (255, 0, 0), -1)
-                    cross_info = vehicle.cross_direction or ""
-                    cv2.putText(
-                        frame,
-                        f"ID:{track_id} {label} {vehicle.motion_state} {cross_info}",
-                        (x1, max(y1 - 10, 20)),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.5,
-                        color,
-                        2,
-                    )
+            cv2.putText(
+                frame, speed_label, (x1, speed_y),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1,
+            )
 
         # 只移除確實消失一段時間的追蹤目標，避免仍在畫面中的車輛遺失狀態。
         stale_ids = [
             track_id
             for track_id, vehicle in vehicles.items()
-            if frame_count - vehicle.last_seen_frame > TRACK_TTL_FRAMES
+            if frame_count - vehicle.last_seen_frame > (
+                5 if track_id < 0 else TRACK_TTL_FRAMES
+            )
         ]
         for track_id in stale_ids:
             del vehicles[track_id]
+            speed_estimator.remove(track_id)
 
         now = perf_counter()
         instant_fps = 1.0 / max(now - previous_time, 1e-9)
@@ -796,9 +903,8 @@ def run_monitor(
         previous_time = now
 
         # 直接畫出目前網頁設定的計數線；端點順序也決定 IN／OUT 的側別。
-        with line_lock:
-            line_start, line_end = video_config["line"]
-        cv2.line(frame, line_start, line_end, (0, 0, 255), 4)
+        line_start, line_end = video_config["line"]
+        cv2.line(frame, line_start, line_end, (0, 0, 255), 1)
         cv2.circle(frame, line_start, 7, (0, 255, 255), -1)
         cv2.circle(frame, line_end, 7, (0, 255, 255), -1)
         cv2.putText(
@@ -873,7 +979,7 @@ def run_monitor(
     print("\n========== Summary ==========")
     print(f"Unique tracked vehicles: {len(total_vehicle_ids)}")
     print(f"Violating vehicles: {len(illegal_vehicle_ids)}")
-    print(f"Crossing events: {len(crossing_events)}")
+    print(f"Crossing events: {sum(direction_counts.values())}")
     print(f"IN: {direction_counts['IN']}")
     print(f"OUT: {direction_counts['OUT']}")
     print("=============================")
@@ -918,6 +1024,7 @@ def status():
             },
             "stop_line": getattr(app.state, "stop_line", None),
             "gates": getattr(app.state, "gates", []),
+            "road_boundaries": getattr(app.state, "road_boundaries", None),
             "frame_size": getattr(app.state, "frame_size", None),
         }
 
@@ -947,11 +1054,6 @@ def request_lanenet_reload():
     return {"status": "queued", "message": "Stage-5 重新偵測已排程"}
 
 
-def video_config_for_response():
-    """回傳目前線段；背景工作尚未讀到影片大小前可能沒有設定。"""
-    return getattr(app.state, "line", None)
-
-
 @app.post("/save_points")
 async def save_points(request: Request):
     """儲存以影片寬高比例表示的停止線與多個 Gate 校正資料。"""
@@ -963,48 +1065,93 @@ async def save_points(request: Request):
             raise ValueError("至少需要三個 Gate")
         width, height = app.state.frame_size
 
+        def point_of(item):
+            x, y = float(item["x"]), float(item["y"])
+            if not math.isfinite(x) or not math.isfinite(y) or not (0 <= x <= 1 and 0 <= y <= 1):
+                raise ValueError("座標比例必須介於 0 和 1")
+            return {"x": round(x, 5), "y": round(y, 5)}
+
         def line_of(item):
             line = item["line"]
             points = ((float(line["L"]["x"]), float(line["L"]["y"])), (float(line["R"]["x"]), float(line["R"]["y"])))
             # 新版前端傳 0~1 比例；為相容舊網頁快取，像素座標也轉為比例。
             if any(value > 1 for point in points for value in point):
                 points = tuple((x / max(width - 1, 1), y / max(height - 1, 1)) for x, y in points)
-            points = tuple((round(x, 5), round(y, 5)) for x, y in points)
-            if any(not 0 <= value <= 1 for point in points for value in point):
-                raise ValueError("座標比例必須介於 0 和 1")
-            return points
+            normalized = tuple(point_of({"x": x, "y": y}) for x, y in points)
+            if math.hypot(
+                (normalized[1]["x"] - normalized[0]["x"]) * (width - 1),
+                (normalized[1]["y"] - normalized[0]["y"]) * (height - 1),
+            ) < 2:
+                raise ValueError("線段長度不可小於 2 像素")
+            return normalized
+
         stop_points = line_of(stop_line)
         normalized_gates = []
         for gate in gates:
             line = line_of(gate)
-            normalized_gates.append({
+            normalized_gate = {
                 "gate": str(gate["gate"]),
                 "lane": int(gate["lane"]),
                 "station_m": float(gate["station_m"]),
-                "line": {"L": {"x": line[0][0], "y": line[0][1]}, "R": {"x": line[1][0], "y": line[1][1]}},
-            })
+                "line": {"L": line[0], "R": line[1]},
+            }
+            if "anchor" in gate or "angle_deg" in gate:
+                normalized_gate["anchor"] = point_of(gate["anchor"])
+                normalized_gate["angle_deg"] = float(gate["angle_deg"])
+                if not math.isfinite(normalized_gate["angle_deg"]):
+                    raise ValueError("Gate 角度須為有限數字")
+            normalized_gates.append(normalized_gate)
         if any(gate["lane"] < 1 for gate in normalized_gates):
             raise ValueError("lane（車道數）至少為 1")
+        if len({gate["gate"] for gate in normalized_gates}) != len(normalized_gates):
+            raise ValueError("Gate 名稱不可重複")
+        if any(not math.isfinite(gate["station_m"]) for gate in normalized_gates):
+            raise ValueError("Gate 的 station_m 須為有限數字")
         if any(b["station_m"] <= a["station_m"] for a, b in zip(normalized_gates, normalized_gates[1:])):
             raise ValueError("Gate 的 station_m 必須依 Gate 順序遞增")
+        road_boundaries = None
+        if "road_boundaries" in data:
+            raw_boundaries = data["road_boundaries"]
+            road_boundaries = {}
+            for side in ("L", "R"):
+                raw_points = raw_boundaries[side]
+                if not isinstance(raw_points, list) or len(raw_points) < 2:
+                    raise ValueError(f"{side} 道路邊界至少需要兩個點")
+                road_boundaries[side] = [point_of(point) for point in raw_points]
+                start = road_boundaries[side][0]
+                stop = stop_points[0 if side == "L" else 1]
+                if math.hypot(
+                    (start["x"] - stop["x"]) * (width - 1),
+                    (start["y"] - stop["y"]) * (height - 1),
+                ) > 2:
+                    raise ValueError(f"{side} 道路邊界必須從停止線端點開始")
+            lane_count = int(data["lane_count"])
+            if lane_count < 1 or any(gate["lane"] != lane_count for gate in normalized_gates):
+                raise ValueError("所有 Gate 的車道數必須與道路車道數一致")
     except (ValueError, KeyError, TypeError, json.JSONDecodeError) as error:
         raise HTTPException(status_code=422, detail=f"無效的計數線：{error}") from error
 
     with line_lock:
-        app.state.video_config["line"] = stop_points
-        app.state.stop_line = [{"x": x, "y": y} for x, y in stop_points]
+        app.state.video_config["line"] = tuple((point["x"], point["y"]) for point in stop_points)
+        app.state.stop_line = list(stop_points)
         app.state.gates = normalized_gates
+        app.state.road_boundaries = road_boundaries
 
     POINTS_FILE.parent.mkdir(parents=True, exist_ok=True)
     payload = {
-        "schema_version": 2,
+        "schema_version": 3 if road_boundaries is not None else 2,
         "video": {
             "name": getattr(app.state, "source_name", DEFAULT_VIDEO_NAME),
             "coordinate_system": "normalized_0_to_1",
+            "width": width,
+            "height": height,
         },
-        "stop_line": {"line": {"L": {"x": stop_points[0][0], "y": stop_points[0][1]}, "R": {"x": stop_points[1][0], "y": stop_points[1][1]}}},
+        "stop_line": {"line": {"L": stop_points[0], "R": stop_points[1]}},
         "gates": normalized_gates,
     }
+    if road_boundaries is not None:
+        payload["lane_count"] = lane_count
+        payload["road_boundaries"] = road_boundaries
     with POINTS_FILE.open("w", encoding="utf-8") as file:
         json.dump(payload, file, ensure_ascii=False, indent=2)
 
@@ -1014,36 +1161,39 @@ async def save_points(request: Request):
 
 @app.post("/start_processing")
 def start_processing():
-    if len(getattr(app.state, "gates", [])) < 3:
-        raise HTTPException(status_code=422, detail="請先儲存至少三個 Gate")
-    if getattr(app.state, "processing_started", False):
-        raise HTTPException(status_code=409, detail="判斷已經開始")
-    app.state.processing_started = True
-    Thread(target=app.state.monitor_worker, daemon=True).start()
+    with line_lock:
+        if len(getattr(app.state, "gates", [])) < 3:
+            raise HTTPException(status_code=422, detail="請先儲存至少三個 Gate")
+        if getattr(app.state, "processing_started", False):
+            raise HTTPException(status_code=409, detail="判斷已經開始")
+        app.state.processing_started = True
+        app.state.cancel_requested = False
+        frame_broadcaster.reset()
+        thread = Thread(target=app.state.monitor_worker, daemon=True)
+        app.state.monitor_thread = thread
+        thread.start()
     return {"status": "started"}
 
 @app.post("/api/reset")
 def reset_processing():
-    if getattr(app.state, "processing_started", False):
-        app.state.cancel_requested = True
-        # 等待背景迴圈確實中斷並把 processing_started 改為 False
-        while getattr(app.state, "processing_started", False):
-            time.sleep(0.1)
-    
-    # 狀態重置，準備下一次啟動
-    app.state.cancel_requested = False
     with line_lock:
+        thread = getattr(app.state, "monitor_thread", None)
+        if getattr(app.state, "processing_started", False):
+            app.state.cancel_requested = True
+    # 等待整個工作執行緒（包含 finally）結束，才讓新一輪判斷開始。
+    if thread is not None and thread.is_alive():
+        thread.join()
+    with line_lock:
+        app.state.cancel_requested = False
+        app.state.monitor_thread = None
         if getattr(app.state, "road_marking_reload_requested", False):
             app.state.road_marking_reload_requested = False
             road_marking_status.update(
                 state="error",
                 message="Reload LaneNet 已取消；保留上次標線",
             )
-    frame_broadcaster._finished = False
-    with frame_broadcaster._condition:
-        frame_broadcaster._sequence += 1
-        frame_broadcaster._condition.notify_all()
-    
+    frame_broadcaster.reset()
+
     return {"status": "success", "message": "後端已重置"}
 
 
@@ -1052,7 +1202,7 @@ def main():
     source_group = parser.add_mutually_exclusive_group()
     source_group.add_argument(
         "--source",
-        help="影片、串流網址或影像來源路徑；未指定時預設使用虛擬相機",
+        help="影片、串流網址或影像來源路徑；未指定時依 DEFAULT_INPUT_MODE 選擇來源",
     )
     source_group.add_argument(
         "--camera",
@@ -1092,12 +1242,12 @@ def main():
         "--device",
         default="auto",
         choices=("auto", "cpu", "cuda", "mps"),
-        help="預設 auto：依序使用 MPS、CUDA、CPU",
+        help="預設 auto：依序使用 CUDA、MPS、CPU；指定的加速裝置不可用時使用 CPU",
     )
     parser.add_argument(
         "--model",
         default=MODEL_PATH,
-        help="YOLO 權重 .pt 檔路徑（預設 yolo11s.pt，首次會自動下載）",
+        help="YOLO 權重 .pt 檔路徑（預設 yolo11x.pt，首次會自動下載）",
     )
     parser.add_argument(
         "--road-model",
