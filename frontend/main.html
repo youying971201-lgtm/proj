@@ -88,6 +88,13 @@
       flex: 1;
       font-weight: 600;
     }
+    .device-status,
+    .scale-status {
+      color: #555;
+      font-size: 12px;
+      font-weight: 700;
+      white-space: nowrap;
+    }
     .lane-default {
       align-items: center;
       display: flex;
@@ -239,6 +246,8 @@
       </section>
       <section class="bottom">
         <span class="status" id="status">正在準備影片第一幀…</span>
+        <span class="device-status" id="deviceStatus" hidden></span>
+        <span class="scale-status" id="visualScaleStatus" hidden></span>
         <label class="lane-default">預設車道數 
           <input id="defaultLane" type="number" min="1" value="1" disabled>
         </label>
@@ -299,6 +308,8 @@
       canvas = document.querySelector('#canvas'),
       ctx = canvas.getContext('2d'),
       status = document.querySelector('#status'),
+      deviceStatus = document.querySelector('#deviceStatus'),
+      visualScaleStatus = document.querySelector('#visualScaleStatus'),
       drawButton = document.querySelector('#draw'),
       undoButton = document.querySelector('#undo'),
       redoButton = document.querySelector('#redo'),
@@ -328,10 +339,33 @@
         const data = await response.json();
         processingStarted = data.processing_started;
         roadModelEnabled = data.road_markings.enabled;
+        const devices = data.devices;
+        deviceStatus.hidden = !processingStarted || !devices;
+        if (processingStarted && devices) {
+          const yoloDevice = String(devices.yolo || 'unknown').toUpperCase();
+          const stage5Device = devices.stage5
+            ? `${String(devices.stage5).toUpperCase()}（Reload 時）`
+            : '停用';
+          deviceStatus.textContent = `裝置：YOLO ${yoloDevice}｜Stage-5 ${stage5Device}`;
+          deviceStatus.title = '顯示後端實際選定的推論裝置；Stage-5 只在 Reload LaneNet 時載入';
+        }
+        const scale = data.speed_scale || data.visual_scale;
+        visualScaleStatus.hidden = !processingStarted || !scale;
+        if (processingStarted && scale) {
+          visualScaleStatus.title = scale.method === 'gate_distance'
+            ? '以使用者標示的相鄰一般 Gate 距離 10 m 為基準；現地距離尚未量測驗證'
+            : '使用車種尺寸先驗估算，尚未與實測車速比對';
+          visualScaleStatus.textContent = scale.method === 'gate_distance'
+            ? '測速基準：相鄰一般 Gate 10 m（現地距離假設）'
+            : scale.state === 'ready'
+              ? `畫面測速：${scale.quality === 'MED' ? '中' : '低'}可信（${scale.vehicles} 台車，尺寸先驗）`
+              : `畫面測速：尺度仍用先驗（已取得 ${scale.vehicles} 台車）`;
+        }
         reloadButton.disabled = !processingStarted || !roadModelEnabled ||
           reloadInProgress || data.road_markings.state === 'loading';
       } catch (error) {
         roadModelEnabled = false;
+        deviceStatus.hidden = true;
         console.error(error);
         reloadButton.disabled = true;
       }

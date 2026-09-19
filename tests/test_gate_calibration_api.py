@@ -90,6 +90,27 @@ class GateCalibrationApiTests(unittest.TestCase):
         self.assertEqual(error.exception.status_code, 422)
         self.assertFalse(self.points_file.exists())
 
+    def test_normalizes_gate_distance_to_ten_meters(self):
+        payload = self.payload()
+        for index, gate in enumerate(payload["gates"]):
+            gate["station_m"] = index * 25
+
+        asyncio.run(main.save_points(request_for(payload)))
+        saved = json.loads(self.points_file.read_text(encoding="utf-8"))
+        self.assertEqual(
+            [gate["station_m"] for gate in saved["gates"]],
+            [0, 10, 20, 30, 40],
+        )
+
+    def test_rejects_missing_gate_number_for_ten_meter_scale(self):
+        payload = self.payload()
+        payload["gates"][1]["gate"] = "Gate 3"
+
+        with self.assertRaises(HTTPException) as error:
+            asyncio.run(main.save_points(request_for(payload)))
+        self.assertEqual(error.exception.status_code, 422)
+        self.assertFalse(self.points_file.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

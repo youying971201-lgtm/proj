@@ -23,7 +23,7 @@ os.environ.setdefault("YOLO_CONFIG_DIR", str(_DEFAULT_YOLO_CONFIG_DIR))
 from ultralytics import YOLO
 
 from Car import Vehicle
-from gate_speed import GateSpeedEstimator, segment_intersection
+from gate_speed import GateSpeedEstimator, known_gate_stations, segment_intersection
 from road_marking import RoadMarkingDetector, draw_road_markings
 from trafficLight import TrafficLightDetector
 from video_source import CAMERA_BACKENDS, list_available_cameras, open_video_capture
@@ -32,7 +32,7 @@ from video_source import CAMERA_BACKENDS, list_available_cameras, open_video_cap
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 # 影像來源預設值：改成 "camera" 使用攝影機，改成 "video" 使用下方影片。
 DEFAULT_INPUT_MODE = "video"
-DEFAULT_VIDEO_NAME = "newVid.MOV"
+DEFAULT_VIDEO_NAME = "newVid1.MOV"
 DEFAULT_CAMERA_INDEX = 1
 DEFAULT_CAMERA_WIDTH = 1280
 DEFAULT_CAMERA_HEIGHT = 720
@@ -127,6 +127,7 @@ class FallbackVehicleTracker:
         self.max_gap_frames = max_gap_frames
         self.next_id = -1
         self.tracks = {}
+        self.formal_tracks = {}
 
     @staticmethod
     def _match_score(previous, current):
@@ -178,6 +179,95 @@ class FallbackVehicleTracker:
             self.tracks[track_id] = (tuple(box), frame_number)
             assigned.append(track_id)
         return assigned
+
+    def claim_formal_ids(
+        self, boxes, ids, frame_number, active_temporary_ids, known_ids,
+    ):
+        """短暫無 ID 的同車取得正式 ID 時，保守地配對原測速軌跡。"""
+        active_temporary_ids = set(active_temporary_ids)
+        known_ids = set(known_ids)
+        candidates = []
+        for box, formal_id in zip(boxes, ids):
+            if formal_id < 0 or formal_id in known_ids:
+                continue
+            for temporary_id, (previous, seen) in self.tracks.items():
+                if (
+                    temporary_id in active_temporary_ids
+                    or temporary_id not in known_ids
+                    or not 1 <= frame_number - seen <= 2
+                ):
+                    continue
+                score = self._match_score(previous, box)
+                if score is not None and score >= 0.15:
+                    candidates.append((score, temporary_id, formal_id))
+        claimed_temporary = set()
+        claimed_formal = set()
+        matches = []
+        for _, temporary_id, formal_id in sorted(candidates, reverse=True):
+            if temporary_id in claimed_temporary or formal_id in claimed_formal:
+                continue
+            claimed_temporary.add(temporary_id)
+            claimed_formal.add(formal_id)
+            matches.append((temporary_id, formal_id))
+        for temporary_id, _ in matches:
+            del self.tracks[temporary_id]
+        return matches
+
+    def claim_temporary_ids(
+        self, boxes, ids, frame_number, active_formal_ids, known_ids,
+    ):
+        """正式 ID 暫時消失時，將同一台車的測速狀態交給 TEMP。"""
+        active_formal_ids = set(active_formal_ids)
+        known_ids = set(known_ids)
+        candidates = []
+        for box, temporary_id in zip(boxes, ids):
+            if temporary_id >= 0 or temporary_id in known_ids:
+                continue
+            for formal_id, (previous, seen) in self.formal_tracks.items():
+                if (
+                    formal_id in active_formal_ids
+                    or formal_id not in known_ids
+                    or not 1 <= frame_number - seen <= 2
+                ):
+                    continue
+                score = self._match_score(previous, box)
+                if score is not None and score >= 0.15:
+                    candidates.append((score, formal_id, temporary_id))
+        claimed_formal = set()
+        claimed_temporary = set()
+        matches = []
+        for _, formal_id, temporary_id in sorted(candidates, reverse=True):
+            if formal_id in claimed_formal or temporary_id in claimed_temporary:
+                continue
+            claimed_formal.add(formal_id)
+            claimed_temporary.add(temporary_id)
+            matches.append((formal_id, temporary_id))
+        return matches
+
+    def observe_formal_ids(self, boxes, ids, frame_number):
+        self.formal_tracks = {
+            track_id: (box, seen)
+            for track_id, (box, seen) in self.formal_tracks.items()
+            if frame_number - seen <= self.max_gap_frames
+        }
+        for box, track_id in zip(boxes, ids):
+            if track_id >= 0:
+                self.formal_tracks[track_id] = (tuple(box), frame_number)
+
+
+def vehicle_ground_contact(box, polygon=None):
+    """有實例輪廓時取底部接觸區；一般 YOLO 框則用底部中心。"""
+    x1, _, x2, y2 = box
+    if polygon is not None:
+        points = np.asarray(polygon, dtype=float).reshape(-1, 2)
+        if len(points) >= 3 and np.isfinite(points).all():
+            bottom_y = float(points[:, 1].max())
+            near_bottom = points[points[:, 1] >= bottom_y - 0.04 * max(y2 - box[1], 1)]
+            if len(near_bottom):
+                contact_x = float(np.median(near_bottom[:, 0]))
+                if x1 <= contact_x <= x2 and abs(bottom_y - y2) <= 0.15 * max(y2 - box[1], 1):
+                    return round(contact_x), round(bottom_y)
+    return (round((x1 + x2) / 2), round(y2))
 
 
 frame_broadcaster = FrameBroadcaster()
@@ -419,6 +509,8 @@ def prepare_configuration_frame(
         app.state.stop_line = [{"x": x, "y": y} for x, y in stop_line]
         app.state.gates = []
         app.state.road_boundaries = None
+        app.state.visual_scale_status = None
+        app.state.inference_devices = None
     frame_broadcaster.publish(frame)
     set_runtime_status("configuring", "請標示停止線與至少三個 Gate，再按開始判斷")
 
@@ -553,6 +645,11 @@ def run_monitor(
         if road_model_path is not None else None
     )
     road_device = resolve_road_marking_device(selected_device)
+    with line_lock:
+        app.state.inference_devices = {
+            "yolo": selected_device,
+            "stage5": road_device if resolved_road_model_path is not None else None,
+        }
     cap = open_video_capture(
         video_source,
         camera_backend,
@@ -635,7 +732,10 @@ def run_monitor(
     speed_estimator = GateSpeedEstimator(
         speed_gates, (width, height), speed_boundaries,
         stop_line=video_config["line"],
+        known_gate_spacing=True,
     )
+    with line_lock:
+        app.state.visual_scale_status = speed_estimator.metric_calibrator.as_dict()
 
     vehicles = {}
     fallback_tracker = FallbackVehicleTracker()
@@ -791,6 +891,7 @@ def run_monitor(
             if class_id in VEHICLE_CLASSES
         ]
         vehicle_boxes = [boxes[index] for index in vehicle_indices]
+        mask_polygons = getattr(getattr(result, "masks", None), "xy", None)
         if result.boxes.id is not None:
             all_ids = result.boxes.id.cpu().numpy().astype(int)
             vehicle_ids = [int(all_ids[index]) for index in vehicle_indices]
@@ -804,10 +905,27 @@ def run_monitor(
         )
         for index, temporary_id in zip(missing_indices, temporary_ids):
             vehicle_ids[index] = temporary_id
+        active_formal_ids = [track_id for track_id in vehicle_ids if track_id >= 0]
+        for formal_id, temporary_id in fallback_tracker.claim_temporary_ids(
+            vehicle_boxes, vehicle_ids, frame_count, active_formal_ids,
+            speed_estimator.tracks.keys(),
+        ):
+            speed_estimator.reassign_track(formal_id, temporary_id)
+        for temporary_id, formal_id in fallback_tracker.claim_formal_ids(
+            vehicle_boxes, vehicle_ids, frame_count, temporary_ids,
+            speed_estimator.tracks.keys(),
+        ):
+            speed_estimator.reassign_track(temporary_id, formal_id)
+        fallback_tracker.observe_formal_ids(vehicle_boxes, vehicle_ids, frame_count)
 
-        for box, track_id in zip(vehicle_boxes, vehicle_ids):
+        for box, track_id, source_index in zip(vehicle_boxes, vehicle_ids, vehicle_indices):
             x1, y1, x2, y2 = box
-            center = ((x1 + x2) // 2, y2)
+            polygon = (
+                mask_polygons[source_index]
+                if mask_polygons is not None and source_index < len(mask_polygons)
+                else None
+            )
+            center = vehicle_ground_contact(box, polygon)
             has_tracker_id = track_id >= 0
             if has_tracker_id:
                 total_vehicle_ids.add(track_id)
@@ -851,6 +969,8 @@ def run_monitor(
             speed_estimate = speed_estimator.update(
                 track_id, center, frame_timestamp, frame_count
             )
+            speed_zone_state = speed_estimator.speed_zone_state(track_id)
+            section_estimate = speed_estimator.section_speed(track_id)
             color = (
                 (0, 0, 255) if vehicle.illegal else
                 (255, 0, 0) if vehicle.motion_state == "STOPPED" else
@@ -858,8 +978,9 @@ def run_monitor(
             )
             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
             cv2.circle(frame, center, 5, (255, 0, 0), -1)
-            speed_y = max(y1 - 10, 22)
-            label_y = max(speed_y - 20, 18)
+            has_speed_label = speed_zone_state in ("inside", "after")
+            speed_y = max(y1 - 10, 36 if has_speed_label else 18)
+            label_y = speed_y - 18 if has_speed_label else speed_y
             if has_tracker_id:
                 label = "ILLEGAL" if vehicle.illegal else "OK"
                 identity = f"ID:{track_id} {label}"
@@ -871,19 +992,43 @@ def run_monitor(
                 (x1, label_y),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1,
             )
-            if speed_estimate is None:
-                speed_label = "EST -- km/h"
-            else:
-                estimate_source = "" if speed_estimate.lane_adjusted else " base"
-                estimate_kind = "AVG" if speed_estimate.method == "gate" else "LIVE"
-                speed_label = (
-                    f"EST {estimate_kind} {speed_estimate.kmh:.1f} km/h "
-                    f"(L{speed_estimate.lane_number}{estimate_source})"
+            if speed_zone_state == "inside":
+                if speed_estimate is None:
+                    speed_label = "EST -- km/h (estimate)"
+                else:
+                    qualifier = (
+                        " (estimate)"
+                        if speed_estimate.confidence == "PROVISIONAL" else ""
+                    )
+                    speed_label = (
+                        f"EST {speed_estimate.kmh:.1f} km/h{qualifier} "
+                        f"L{speed_estimate.lane_number}"
+                    )
+                speed_width = cv2.getTextSize(
+                    speed_label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1
+                )[0][0]
+                speed_x = max(0, min(x1, frame.shape[1] - speed_width - 4))
+                cv2.putText(
+                    frame, speed_label, (speed_x, speed_y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1,
                 )
-            cv2.putText(
-                frame, speed_label, (x1, speed_y),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1,
-            )
+            elif speed_zone_state == "after":
+                if section_estimate is None:
+                    section_label = "SECTION -- km/h"
+                else:
+                    pair = (
+                        f"{section_estimate.from_gate.replace('Gate ', 'G')}-"
+                        f"{section_estimate.to_gate.replace('Gate ', 'G')}"
+                    )
+                    section_label = f"SECTION {section_estimate.kmh:.1f} km/h {pair}"
+                section_width = cv2.getTextSize(
+                    section_label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 2
+                )[0][0]
+                section_x = max(0, min(x1, frame.shape[1] - section_width - 4))
+                cv2.putText(
+                    frame, section_label, (section_x, speed_y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2,
+                )
 
         # 只移除確實消失一段時間的追蹤目標，避免仍在畫面中的車輛遺失狀態。
         stale_ids = [
@@ -1025,6 +1170,9 @@ def status():
             "stop_line": getattr(app.state, "stop_line", None),
             "gates": getattr(app.state, "gates", []),
             "road_boundaries": getattr(app.state, "road_boundaries", None),
+            "visual_scale": getattr(app.state, "visual_scale_status", None),
+            "speed_scale": getattr(app.state, "visual_scale_status", None),
+            "devices": getattr(app.state, "inference_devices", None),
             "frame_size": getattr(app.state, "frame_size", None),
         }
 
@@ -1109,6 +1257,8 @@ async def save_points(request: Request):
             raise ValueError("Gate 的 station_m 須為有限數字")
         if any(b["station_m"] <= a["station_m"] for a, b in zip(normalized_gates, normalized_gates[1:])):
             raise ValueError("Gate 的 station_m 必須依 Gate 順序遞增")
+        for gate, station in zip(normalized_gates, known_gate_stations(normalized_gates)):
+            gate["station_m"] = station
         road_boundaries = None
         if "road_boundaries" in data:
             raw_boundaries = data["road_boundaries"]
@@ -1186,6 +1336,7 @@ def reset_processing():
     with line_lock:
         app.state.cancel_requested = False
         app.state.monitor_thread = None
+        app.state.visual_scale_status = None
         if getattr(app.state, "road_marking_reload_requested", False):
             app.state.road_marking_reload_requested = False
             road_marking_status.update(
@@ -1316,6 +1467,7 @@ def main():
     app.state.road_model_path = None if args.no_road_markings else args.road_model
     app.state.road_marking_reload_requested = False
     app.state.road_marking_result = None
+    app.state.visual_scale_status = None
     with line_lock:
         road_marking_status.update(
             enabled=not args.no_road_markings,
