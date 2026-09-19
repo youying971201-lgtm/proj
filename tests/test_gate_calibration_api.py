@@ -59,6 +59,7 @@ class GateCalibrationApiTests(unittest.TestCase):
         return {
             "schema_version": 3,
             "lane_count": 2,
+            "detection_mode": "leaving",
             "stop_line": {"line": stop},
             "road_boundaries": {
                 "L": [stop["L"], {"x": 0.24, "y": 0.1}],
@@ -74,6 +75,8 @@ class GateCalibrationApiTests(unittest.TestCase):
         self.assertEqual(result["status"], "success")
         self.assertEqual(saved["schema_version"], 3)
         self.assertEqual(saved["lane_count"], 2)
+        self.assertEqual(saved["detection_mode"], "leaving")
+        self.assertEqual(main.app.state.detection_mode, "leaving")
         self.assertEqual(saved["video"]["width"], 1000)
         self.assertEqual(saved["gates"][0]["station_m"], 0)
         self.assertEqual(saved["gates"][0]["anchor"], {"x": 0.5, "y": 0.7})
@@ -87,6 +90,47 @@ class GateCalibrationApiTests(unittest.TestCase):
 
         with self.assertRaises(HTTPException) as error:
             asyncio.run(main.save_points(request_for(payload)))
+        self.assertEqual(error.exception.status_code, 422)
+        self.assertFalse(self.points_file.exists())
+
+    def test_normalizes_gate_distance_to_ten_meters(self):
+        payload = self.payload()
+        for index, gate in enumerate(payload["gates"]):
+            gate["station_m"] = index * 25
+
+        asyncio.run(main.save_points(request_for(payload)))
+        saved = json.loads(self.points_file.read_text(encoding="utf-8"))
+        self.assertEqual(
+            [gate["station_m"] for gate in saved["gates"]],
+            [0, 10, 20, 30, 40],
+        )
+
+    def test_rejects_missing_gate_number_for_ten_meter_scale(self):
+        payload = self.payload()
+        payload["gates"][1]["gate"] = "Gate 3"
+
+        with self.assertRaises(HTTPException) as error:
+            asyncio.run(main.save_points(request_for(payload)))
+        self.assertEqual(error.exception.status_code, 422)
+        self.assertFalse(self.points_file.exists())
+
+    def test_saves_entering_detection_mode(self):
+        payload = self.payload()
+        payload["detection_mode"] = "entering"
+
+        asyncio.run(main.save_points(request_for(payload)))
+        saved = json.loads(self.points_file.read_text(encoding="utf-8"))
+
+        self.assertEqual(saved["detection_mode"], "entering")
+        self.assertEqual(main.app.state.detection_mode, "entering")
+
+    def test_rejects_unknown_detection_mode(self):
+        payload = self.payload()
+        payload["detection_mode"] = "sideways"
+
+        with self.assertRaises(HTTPException) as error:
+            asyncio.run(main.save_points(request_for(payload)))
+
         self.assertEqual(error.exception.status_code, 422)
         self.assertFalse(self.points_file.exists())
 

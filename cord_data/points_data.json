@@ -18,6 +18,7 @@
       }
     }
   },
+  "detection_mode": "entering",
   "gates": [
     {
       "gate": "Gate 1",

@@ -88,12 +88,66 @@
       flex: 1;
       font-weight: 600;
     }
+    .device-status,
+    .scale-status {
+      color: #555;
+      font-size: 12px;
+      font-weight: 700;
+      white-space: nowrap;
+    }
     .lane-default {
       align-items: center;
       display: flex;
       font-weight: 700;
       gap: 8px;
       white-space: nowrap;
+    }
+    .detection-mode {
+      align-items: center;
+      display: flex;
+      font-weight: 700;
+      gap: 8px;
+      white-space: nowrap;
+    }
+    .mode-switch {
+      display: inline-flex;
+      position: relative;
+    }
+    .mode-switch input {
+      height: 1px;
+      opacity: 0;
+      position: absolute;
+      width: 1px;
+    }
+    .mode-slider {
+      background: #777;
+      border-radius: 14px;
+      cursor: pointer;
+      height: 24px;
+      position: relative;
+      transition: background .2s;
+      width: 44px;
+    }
+    .mode-slider::before {
+      background: #fff;
+      border-radius: 50%;
+      content: '';
+      height: 18px;
+      left: 3px;
+      position: absolute;
+      top: 3px;
+      transition: transform .2s;
+      width: 18px;
+    }
+    .mode-switch input:checked + .mode-slider {
+      background: #2987d8;
+    }
+    .mode-switch input:checked + .mode-slider::before {
+      transform: translateX(20px);
+    }
+    .mode-switch input:focus-visible + .mode-slider {
+      outline: 2px solid #202124;
+      outline-offset: 2px;
     }
     .lane-default input,
     .gate-row input {
@@ -239,8 +293,17 @@
       </section>
       <section class="bottom">
         <span class="status" id="status">正在準備影片第一幀…</span>
+        <span class="device-status" id="deviceStatus" hidden></span>
+        <span class="scale-status" id="visualScaleStatus" hidden></span>
         <label class="lane-default">預設車道數 
           <input id="defaultLane" type="number" min="1" value="1" disabled>
+        </label>
+        <label class="detection-mode" title="scooter 一律使用 my_model.pt；離鏡頭的 car 也使用該模型">
+          主要偵測：<strong id="detectionModeText">離鏡頭</strong>
+          <span class="mode-switch">
+            <input id="detectionModeSwitch" type="checkbox" role="switch" aria-label="切換入鏡頭或離鏡頭主要偵測模式">
+            <span class="mode-slider" aria-hidden="true"></span>
+          </span>
         </label>
         <button class="start secondary" id="finishBoundary" disabled>完成此邊界（Enter）</button>
         <button class="start secondary" id="fractionalGate" disabled>下一條為 .4 Gate</button>
@@ -299,6 +362,8 @@
       canvas = document.querySelector('#canvas'),
       ctx = canvas.getContext('2d'),
       status = document.querySelector('#status'),
+      deviceStatus = document.querySelector('#deviceStatus'),
+      visualScaleStatus = document.querySelector('#visualScaleStatus'),
       drawButton = document.querySelector('#draw'),
       undoButton = document.querySelector('#undo'),
       redoButton = document.querySelector('#redo'),
@@ -306,6 +371,8 @@
       startButton = document.querySelector('#start'),
       reloadButton = document.querySelector('#reloadLaneNet'),
       defaultLaneInput = document.querySelector('#defaultLane'),
+      detectionModeSwitch = document.querySelector('#detectionModeSwitch'),
+      detectionModeText = document.querySelector('#detectionModeText'),
       gateList = document.querySelector('#gateList');
 
     const steps = {
@@ -328,10 +395,33 @@
         const data = await response.json();
         processingStarted = data.processing_started;
         roadModelEnabled = data.road_markings.enabled;
+        const devices = data.devices;
+        deviceStatus.hidden = !processingStarted || !devices;
+        if (processingStarted && devices) {
+          const yoloDevice = String(devices.yolo || 'unknown').toUpperCase();
+          const stage5Device = devices.stage5
+            ? `${String(devices.stage5).toUpperCase()}（Reload 時）`
+            : '停用';
+          deviceStatus.textContent = `裝置：YOLO ${yoloDevice}｜Stage-5 ${stage5Device}`;
+          deviceStatus.title = '顯示後端實際選定的推論裝置；Stage-5 只在 Reload LaneNet 時載入';
+        }
+        const scale = data.speed_scale || data.visual_scale;
+        visualScaleStatus.hidden = !processingStarted || !scale;
+        if (processingStarted && scale) {
+          visualScaleStatus.title = scale.method === 'gate_distance'
+            ? '以使用者標示的相鄰一般 Gate 距離 10 m 為基準；現地距離尚未量測驗證'
+            : '使用車種尺寸先驗估算，尚未與實測車速比對';
+          visualScaleStatus.textContent = scale.method === 'gate_distance'
+            ? '測速基準：相鄰一般 Gate 10 m（現地距離假設）'
+            : scale.state === 'ready'
+              ? `畫面測速：${scale.quality === 'MED' ? '中' : '低'}可信（${scale.vehicles} 台車，尺寸先驗）`
+              : `畫面測速：尺度仍用先驗（已取得 ${scale.vehicles} 台車）`;
+        }
         reloadButton.disabled = !processingStarted || !roadModelEnabled ||
           reloadInProgress || data.road_markings.state === 'loading';
       } catch (error) {
         roadModelEnabled = false;
+        deviceStatus.hidden = true;
         console.error(error);
         reloadButton.disabled = true;
       }
@@ -339,6 +429,22 @@
 
     updateReloadAvailability();
     setInterval(updateReloadAvailability, 2000);
+
+    function selectedDetectionMode() {
+      return detectionModeSwitch.checked ? 'entering' : 'leaving';
+    }
+
+    function refreshDetectionModeText() {
+      detectionModeText.textContent = detectionModeSwitch.checked ? '入鏡頭' : '離鏡頭';
+    }
+
+    detectionModeSwitch.onchange = () => {
+      refreshDetectionModeText();
+      const mode = detectionModeText.textContent;
+      status.textContent = processingStarted
+        ? `主要偵測已選擇「${mode}」；按重新判斷後套用。`
+        : `主要偵測已切換為「${mode}」。`;
+    };
 
     const finishBoundaryButton = document.querySelector('#finishBoundary'),
       fractionalGateButton = document.querySelector('#fractionalGate'),
@@ -555,7 +661,7 @@
     function snapshot() {
       return JSON.parse(JSON.stringify({
         stopLine, boundaries, boundaryDraft, gates, selectedGateIndex, nextFractional,
-        laneCount: Number(defaultLaneInput.value)
+        laneCount: Number(defaultLaneInput.value), detectionMode: selectedDetectionMode()
       }));
     }
 
@@ -563,6 +669,8 @@
       ({ stopLine, boundaries, boundaryDraft, gates, selectedGateIndex, nextFractional } = state);
       stopAnchor = hoverPoint = null;
       defaultLaneInput.value = state.laneCount;
+      detectionModeSwitch.checked = state.detectionMode === 'entering';
+      refreshDetectionModeText();
       refresh();
     }
 
@@ -861,6 +969,7 @@
           height: image.naturalHeight
         },
         lane_count: validLaneCount(),
+        detection_mode: selectedDetectionMode(),
         stop_line: { line: stopLine },
         road_boundaries: boundaries,
         gates: gates.map(({ color, line, ...gate }) => ({
@@ -873,6 +982,7 @@
       return {
         schema_version: 3,
         lane_count: validLaneCount(),
+        detection_mode: selectedDetectionMode(),
         road_boundaries: boundaries,
         stop_line: { line: stopLine },
         gates: gates.map(({ gate, lane, station_m, anchor, angle_deg, line }) => ({
@@ -912,6 +1022,10 @@
       if (distanceInSource(line.L, line.R) < 15) throw Error('停止線太短');
       const count = Number(data.lane_count);
       if (!Number.isInteger(count) || count < 1) throw Error('車道數須為正整數');
+      const detectionMode = data.detection_mode || 'leaving';
+      if (!['entering', 'leaving'].includes(detectionMode)) {
+        throw Error('主要偵測模式無效');
+      }
       const importedBoundaries = {};
       for (const side of ['L', 'R']) {
         const points = data.road_boundaries?.[side];
@@ -950,6 +1064,8 @@
       selectedGateIndex = -1;
       nextFractional = false;
       defaultLaneInput.value = count;
+      detectionModeSwitch.checked = detectionMode === 'entering';
+      refreshDetectionModeText();
       status.textContent = `✅ 已匯入 ${importedGates.length} 條 Gate；請確認畫面與原始影片相符。`;
       refresh();
     }
