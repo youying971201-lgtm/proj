@@ -75,10 +75,18 @@ class GateSpeedDisplayTests(unittest.TestCase):
         class CrossingModel:
             frame_number = 0
 
-            def __init__(self, *_args, **_kwargs):
-                pass
+            def __init__(self, model_path, *_args, **_kwargs):
+                self.is_vehicle_model = Path(model_path).name == "my_model.pt"
 
             def track(self, *_args, **_kwargs):
+                if not self.is_vehicle_model:
+                    boxes = type("Boxes", (), {
+                        "xyxy": FakeTensor(np.empty((0, 4))),
+                        "id": None,
+                        "cls": FakeTensor([]),
+                        "conf": FakeTensor([]),
+                    })()
+                    return [type("Result", (), {"boxes": boxes})()]
                 index = self.__class__.frame_number
                 bottom = (0, 15, 30, 45, 70, 85, 100, 120, 170, 220, 250)[index]
                 self.__class__.frame_number += 1

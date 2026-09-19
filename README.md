@@ -17,6 +17,7 @@
 | 紅燈越線提示 | 已依單一號誌顏色與停止線跨越事件實作；仍需人工確認。 |
 | 車流量觀察 | 已顯示 `IN`／`OUT` 越線計數與本次處理摘要，尚未提供長期統計。 |
 | 車輛行駛／停止狀態 | 已依影像位移分類；不是實際車速。 |
+| 行人顯示 | 以預設 YOLO class 0 畫出 `PERSON` 框與信心分數，不參與追蹤、測速、計數或違規判斷。 |
 | 道路標線辨識 | 按 Reload LaneNet 後以 Stage-5 對下一幀分割一次，快取遮罩及座標供後續畫面使用。 |
 | 違規變道判定 | 規劃以跨越實線、變道時未打方向燈為候選條件；尚未實作事件判定。 |
 | 畫面預估測速 | Gate／停止線／邊界提供局部道路幾何；相鄰一般 Gate 固定按 10 公尺換算。車輛位於停止線與末 Gate 之間時以黃字顯示逐幀速度，從任一端離開後只以紅字顯示完整 Gate 區段均速；雙向共用此規則。狀態列提示距離是假設值；尚未與真實車速驗證。 |
@@ -29,7 +30,7 @@ flowchart LR
     A[影片／攝影機] --> B[第一幀校正]
     B --> C[儲存停止線與 Gate]
     C --> D[逐幀分析]
-    D --> E[YOLO11 + ByteTrack]
+    D --> E[依入鏡頭／離鏡頭模式選擇 YOLO 車輛來源]
     D -. 按 Reload LaneNet .-> F[Stage-5 對下一幀分割一次]
     E --> G[號誌、越線、行駛狀態]
     E --> J[Gate 10 公尺尺度、逐幀速度與區段均速]
@@ -40,7 +41,7 @@ flowchart LR
 ```
 
 1. **準備來源。** 未指定時，程式讀取 `python/main.py` 中 `DEFAULT_VIDEO_NAME` 指定的 `inputVideos/` 影片；也可用 `--source` 指定影片／串流，或用 `--camera` 選擇實體、虛擬攝影機。
-2. **校正畫面。** 伺服器先顯示第一幀，此時不執行 YOLO。於網頁上點兩下設定停止線端點、逐點標出道路左右邊界並按 Enter 完成，再點選虛線頂端建立至少五條一般 Gate，並設定整條路的車道數。
+2. **校正畫面。** 伺服器先顯示第一幀，此時不執行 YOLO。於網頁上選擇主要偵測是「入鏡頭」或「離鏡頭」，再點兩下設定停止線端點、逐點標出道路左右邊界並按 Enter 完成，最後點選虛線頂端建立至少五條一般 Gate，並設定整條路的車道數。
 3. **啟動判斷。** 點選「開始判斷」後，網頁先呼叫 `/save_points` 寫入校正檔，再呼叫 `/start_processing` 啟動背景工作。影片會從指定的起始影格重新讀取。
 4. **查看結果。** 網頁顯示車輛 ID、偵測框、`MOVING`／`STOPPED` 狀態、號誌顏色及 `IN`／`OUT` 越線計數。車輛進入停止線與最後一個 Gate 之間後，黃色逐幀速度先顯示 `EST -- km/h (estimate)`，有兩次有效位置後開始顯示數值；至少有四個接地點、軌跡跨越 0.12 秒且速度可與座標抖動區分時移除 `(estimate)`，顯示 0 km/h 則至少觀察 0.4 秒。車輛尚未進入時不顯示速度；從停止線或最後一個 Gate 任一端離開後，只以紅字顯示已完成的連續 Gate 區段均速與起訖 Gate，沒有完整 Gate 對時顯示 `SECTION -- km/h`。下方狀態列會顯示後端實際選定的 YOLO 裝置，以及 Stage-5 在 Reload 時使用的裝置，並提示相鄰一般 Gate 按 10 公尺換算、尚未現地量距。開始判斷後按「Reload LaneNet」才會偵測道路標線並顯示快取結果，座標可由 API 讀取；終端機在處理結束時輸出本次統計。
 5. **重新處理或結束。**「重新判斷」會中止目前工作並以網頁上的校正重新開始；「關閉系統」會停止服務。目前只持久儲存校正資料，沒有匯出標註影片、逐筆事件或統計報表。
@@ -67,13 +68,13 @@ py -3.12 -m pip install -r requirements.txt
 py -3.12 python\main.py --source C:\path\to\video.mp4
 ```
 
-啟動後開啟 <http://127.0.0.1:8000>。若要使用預設來源，先將 `DEFAULT_VIDEO_NAME` 指定的影片放進 `inputVideos/`，再省略 `--source`。專題會依測試需求使用 YOLO11s 或 YOLO11x；目前程式預設 `yolo11x.pt`，第一次使用該官方模型名稱時，Ultralytics 會嘗試下載。要改用 11s 或其他權重，先備妥本機 `.pt` 檔，再以 `--model` 指定。道路標線模型預設讀取團隊自行訓練的 `models/road_marking/stage5_roadmark_best.pth`；缺少該模型時可用 `--no-road-markings`。
+啟動後開啟 <http://127.0.0.1:8000>。若要使用預設來源，先將 `DEFAULT_VIDEO_NAME` 指定的影片放進 `inputVideos/`，再省略 `--source`。前端「主要偵測」預設為「離鏡頭」：`yolo11x.pt` 只取 person class 0 與 traffic light class 9，Git LFS 管理的 `models/my_model.pt` 取 class 2 car 與 class 4 scooter。切換為「入鏡頭」後，預設 YOLO 使用 person、car、bus、truck、traffic light，`models/my_model.pt` 只提供 scooter；預設 YOLO 的 motorcycle class 3 不使用。兩種模式的 scooter 都只由 `my_model.pt` 判斷，行人都只畫框，不進入車輛機制。`--model` 可改用 YOLO11n／s／m／l／x 或本機相容權重；`--vehicle-model` 指定兩種模式的 scooter，以及離鏡頭模式的 car 權重。道路標線模型預設讀取團隊自行訓練的 `models/road_marking/stage5_roadmark_best.pth`；缺少該模型時可用 `--no-road-markings`。
 
 常用選項（macOS；Windows 將 `python3.12` 改為 `py -3.12`，並依系統調整路徑）：
 
 ```bash
-# 指定裝置及自訂 YOLO 權重
-python3.12 python/main.py --source /path/to/video.mp4 --device cpu --model /path/to/model.pt
+# 指定裝置、預設 YOLO 及 car／scooter 模型
+python3.12 python/main.py --source /path/to/video.mp4 --device cpu --model /path/to/light-model.pt --vehicle-model /path/to/vehicle-model.pt
 
 # 使用攝影機或 OBS Virtual Camera；索引依電腦而異
 python3.12 python/main.py --camera 1 --camera-width 1280 --camera-height 720 --camera-fps 30
@@ -84,9 +85,9 @@ python3.12 python/main.py --road-marking-max-side 960
 python3.12 python/main.py --no-road-markings
 ```
 
-`--device auto` 依序選擇 CUDA、MPS、CPU；明確指定 CUDA 或 MPS 但當前不可用時會改用 CPU。YOLO 輸入長邊目前於 MPS 使用 640，CUDA／CPU 使用 512；道路標線模型預設使用長邊 1280。Stage-5 在 YOLO 使用 MPS 時改用 CPU，使用 CUDA 時仍用 CUDA。開始判斷後，網頁狀態列會顯示例如 `裝置：YOLO MPS｜Stage-5 CPU（Reload 時）` 的實際選擇；停用道路標線時會顯示 Stage-5 停用。Windows 攝影機無法讀取時可嘗試 `--camera-backend dshow` 或 `msmf`。其餘選項請在 macOS 執行 `python3.12 python/main.py --help`，或在 Windows 執行 `py -3.12 python\main.py --help`。
+`--device auto` 依序選擇 CUDA、MPS、CPU；明確指定 CUDA 或 MPS 但當前不可用時會改用 CPU。兩種主要偵測模式每幀都執行預設 YOLO 與團隊車輛 YOLO，因為 scooter 一律由後者判斷；兩個模型使用同一裝置及輸入尺寸：MPS 長邊 640，CUDA／CPU 長邊 512。道路標線模型預設使用長邊 1280；Stage-5 在 YOLO 使用 MPS 時改用 CPU，使用 CUDA 時仍用 CUDA。開始判斷後，網頁狀態列會顯示實際裝置。Windows 攝影機無法讀取時可嘗試 `--camera-backend dshow` 或 `msmf`。其餘選項請在 macOS 執行 `python3.12 python/main.py --help`，或在 Windows 執行 `py -3.12 python\main.py --help`。
 
-Gate 尺度、速度顯示區間與推論裝置狀態已在 macOS 使用 Python 3.12 執行 `python3.12 -m unittest discover -s tests -v`（67 項通過，含 10 公尺正規化、Gate 交界平滑、加減速與低 FPS 反應、停止線至末 Gate 的雙向進出狀態、黃字與紅字切換、實際裝置 API、`TEMP`／正式 ID 交接及追蹤中斷測試）與 `python3.12 -m compileall -q python`。前端幾何與 JSON 流程先前以 JavaScriptCore 模擬測試通過，`start.command` 先前通過 zsh 語法及 `./start.command --help` 檢查。`inputVideos/newVid.mov` 已可讀取，已用保存的四段 Gate 幾何做合成軌跡檢查；本機目前沒有相容的 YOLO COCO 權重，尚未完成該影片的端到端預估速度、真實速度對照、完整 MJPEG 畫面或 Windows 實測。
+Gate 尺度、速度顯示區間、偵測模式、行人繪圖與推論裝置狀態已在 macOS 使用 Python 3.12 執行 `python3.12 -m unittest discover -s tests -v`（75 項通過）與 `python3.12 -m compileall -q python`；前端腳本另以 JavaScriptCore 通過語法檢查。`inputVideos/newVid.mov` 的單一實際影格已在 CPU、512 px 下驗證：「入鏡頭」預設 YOLO 只請求 class 0／2／5／7／9，實際輸出 class 0／2／7／9，`my_model.pt` 只請求並輸出 class 4 scooter；「離鏡頭」先前已驗證預設 YOLO 輸出 class 0／9、`my_model.pt` 輸出 class 2／4。尚未完成整段影片的端到端預估速度、真實速度對照、完整 MJPEG 畫面或 Windows 實測。
 
 `start.command` 與 `start.bat` 現在會確認 Python 3.12.x 並直接呼叫該版本，不搜尋其他執行環境；macOS 腳本遇到已占用的埠號會報錯，不會強制結束其他服務。`start-virtual-camera.bat` 使用 `--device auto`，有 CUDA 時會選 CUDA，否則走 CPU。腳本仍需在各自系統以實際影片或攝影機完成啟動驗證；若要使用 Windows 的 OBS Virtual Camera，先啟動它，再執行 `start-virtual-camera.bat` 或明確指定 `py -3.12 python\main.py --camera 1 --camera-width 1280 --camera-height 720 --camera-fps 30 --device auto`。若只想驗證道路標線模型，macOS 可執行 `python3.12 python/road_marking_demo.py /path/to/image.jpg`，產生單張影像的疊圖與 JSON 座標。
 
@@ -103,6 +104,7 @@ Gate 尺度、速度顯示區間與推論裝置狀態已在 macOS 使用 Python 
 ```json
 {
   "schema_version": 3,
+  "detection_mode": "leaving",
   "video": {"name": "example.mp4", "coordinate_system": "normalized_0_to_1", "width": 1000, "height": 650},
   "lane_count": 2,
   "stop_line": {"line": {"L": {"x": 0.15, "y": 0.60}, "R": {"x": 0.85, "y": 0.60}}},
@@ -122,13 +124,13 @@ Gate 尺度、速度顯示區間與推論裝置狀態已在 macOS 使用 Python 
 
 後端驗證至少三條 Gate、非零線段、`lane ≥ 1`、座標介於 0～1、`station_m` 遞增，及從 `Gate 1` 起連續編號；選配的 `Gate X.4` 必須緊接 `Gate X`。前端另要求五條一般 Gate。該 JSON 屬執行時校正資料，請勿將不同影像來源的座標直接共用。
 
-「匯出校正 JSON」會另外下載**版本 3** 的 `gate_geometry.json`，儲存停止線、原始影像尺寸、車道數、左右邊界，以及各 Gate 的錨點、影像像素角度與 `station_m`；Gate 的 L/R 由前端重新計算，不存於此匯出檔。可用「匯入校正 JSON」載回同尺寸影片的校正，也可手動匯入新版 `points_data.json`；仍須人工確認是同一個場景。後端儲存檔同時保留計算出的 L/R，供目前的越線與測速流程使用。網頁不會自動回填既有 Gate。
+「匯出校正 JSON」會另外下載**版本 3** 的 `gate_geometry.json`，儲存主要偵測模式、停止線、原始影像尺寸、車道數、左右邊界，以及各 Gate 的錨點、影像像素角度與 `station_m`；Gate 的 L/R 由前端重新計算，不存於此匯出檔。可用「匯入校正 JSON」載回同尺寸影片的校正，也可手動匯入新版 `points_data.json`；沒有 `detection_mode` 的舊版版本 3 檔案會採「離鏡頭」。仍須人工確認是同一個場景。後端儲存檔同時保留計算出的 L/R，供目前的越線與測速流程使用。網頁不會自動回填既有 Gate。
 
 ## 技術原理
 
 ### 車輛與交通號誌
 
-YOLO11 偵測 COCO 類別中的汽車、機車、公車、卡車與交通號誌，Ultralytics 的 ByteTrack 為車輛維持追蹤 ID。程式從號誌框中選出「信心分數 × 面積」最高者，將其 ROI 轉為 HSV 色彩空間，以紅、綠像素比例判斷顏色，再以近期有效結果投票取得穩定狀態。號誌辨識不依賴車輛追蹤 ID；該幀只有號誌偵測、沒有追蹤 ID 時仍會更新狀態。無法辨識的一幀不會立即清除前一個狀態。目前沒有黃燈判斷，也沒有將號誌分別對應到不同車道。
+「入鏡頭」模式由 `--model` 指定的預設 YOLO 提供 class 2 car、5 bus、7 truck，`models/my_model.pt` 只提供 class 4 scooter；預設 YOLO 的 class 3 motorcycle 會被過濾。「離鏡頭」模式由預設 YOLO 提供 class 0 person、9 traffic light，車輛由 `models/my_model.pt` 的 class 2 car、4 scooter 提供，因此不使用 bus／truck。入鏡頭模式的兩個車輛來源使用不同追蹤 ID 命名空間；若預設 YOLO 車框與自訂 scooter 框高度重疊，保留自訂模型結果，避免同一台車重複進入測速與計數流程。離鏡頭模式保留自訂模型原本的 ByteTrack ID。兩種模式都把 person 畫成紫色 `PERSON` 框與信心分數，不建立本系統的行人追蹤、測速、計數或違規狀態。程式從號誌框中選出「信心分數 × 面積」最高者，將 ROI 轉為 HSV 色彩空間，再以近期結果投票穩定紅綠燈狀態；號誌辨識不依賴車輛追蹤 ID。
 
 ### 越線事件與行駛狀態
 
@@ -146,17 +148,115 @@ YOLO11 偵測 COCO 類別中的汽車、機車、公車、卡車與交通號誌�
 
 ### 僅用影片的預估時速
 
-前端停止線、左右邊界與 Gate 定義影像中的道路形狀。`python/gate_speed.py` 以每對 Gate 四端點建立局部透視映射；停止線可延伸第一／末段，邊界用於彎道車道曲線。正式串流將相鄰一般 Gate 設為 10 公尺，選配的 `Gate X.4` 設為從 `Gate X` 起 4 公尺，因此下一條一般 Gate 距它 6 公尺；後端依名稱重新計算 `station_m`，不受舊 JSON 中其他數值影響。**如果實際標線間距不是這些數值，估速就會按距離比例偏移。** 僅靠影像幾何與時間無法驗證這個絕對距離；這裡明確採用操作員提供的距離假設。
+#### 1. 距離基準與接地點
 
-每台車的接地點投影至局部道路平面後，程式在停止線與最後一個 Gate 之間用最近約 0.5～1 秒的軌跡估計速度：遠處透視敏感時保留較長資料，近處縮短視窗以減少加減速延遲；低 FPS 時最多延長到 3.1 秒，盡量保留四個有效位置，因此反應較慢。相鄰 Gate 的局部透視映射在共同 Gate 附近平滑混合，減少跨段時的速度跳躍。程式同時試算 ±2 像素接地點位移，並從軌跡殘差估計實際抖動；位移不足以區分時暫以 0 km/h 處理。逐車濾波依映射敏感度調整響應，並限制單幀速度變化；完成的連續 Gate 區段均速只在透視敏感處限制短時間偏高的逐幀讀數，避免壓低近處真實加速。這些處理會帶來一定延遲，且不能還原畫面中缺失的實際距離資訊。早期讀數保留「(estimate)」；至少四個位置、0.12 秒且讀數可分辨時移除，顯示 0 km/h 則至少觀察 0.4 秒。道路邊界可近似修正彎道內外車道的路徑差；沒有可用邊界時採用 Gate 已知距離，不猜測內外車道差。影片優先使用單調遞增的來源時間戳，不可用時用影格序號／FPS；攝影機使用單調時鐘。ByteTrack 暫無 ID 的 `TEMP` 車也用短期軌跡估速；`TEMP` 與正式 ID 在相鄰兩幀的車框充分重疊時轉移測速與區間狀態，避免 ID 閃爍使讀數重新開始。位置匹配不明確時不強行轉移。
+前端停止線、左右道路邊界與 Gate 定義影像中的道路形狀。程式追蹤車框時，以框底部中央或實例遮罩的底緣作為輪胎接觸路面的近似點。這個點比車框中心更接近道路平面，後續的位置、越線與速度皆以它計算。
 
-停止線與最後一個 Gate 的兩條無限延伸線形成速度顯示區間；程式用各自朝向另一條邊界的半平面判定接地點是否在內，因此無須先假設車輛是 `IN` 或 `OUT`。未進入時沒有速度文字，區間內只有黃色瞬時速度，從任一端離開後只有紅字區段速度。每完成一對相鄰 Gate 的穿越，就把該段距離與時間累積，從首個有效 Gate 到最新 Gate 計算區段平均速度，減少單一短區段的時間抖動；一般 Gate 為 10 公尺，選配 Gate 為 4／6 公尺。若離開時尚無完整區段，顯示 `SECTION -- km/h`。停止線至第一條 Gate 的距離未另行指定，因此不把它當作已知長度來測速；追蹤中斷後會重新建立區間狀態。Gate 穿越時間目前仍由相鄰影格的接地點插值；遠處 Gate 間距小、接地點抖動大時，累積區段只能降低波動，無法保證消除偏差。追蹤 ID 錯置、Gate 點選位置及時間戳異常也仍可能影響結果。
+正式串流依 Gate 名稱建立公尺里程：相鄰一般 Gate 固定相距 10 公尺；`Gate X.4` 位於 `Gate X` 後 4 公尺，因此到下一條一般 Gate 還有 6 公尺。後端會重新產生 `station_m`，不採用舊 JSON 中不符合規則的距離。停止線到第一條 Gate 沒有已知距離，所以該段只用來界定顯示區域，不加入區段測速。
 
-`GET /api/status` 的 `speed_scale` 回報 `gate_distance`、`gate_spacing_m: 10` 及 `quality: ASSUMED`；舊鍵 `visual_scale` 暫留作相容別名。`python/visual_scale.py` 保留多車三維車體尺寸先驗的實驗模組與單元測試，**目前主程式不啟用**。現行 Gate 模型把短段道路近似為平面，無法從單一畫面推得真實坡度或完整三維接地位置。偵測框、遮擋、鏡頭晃動、低 FPS 及錯誤 Gate／邊界仍會影響結果；0 km/h 可能表示移動太小，尚無法與像素抖動區分。此功能尚無真實車速驗證，不供執法。
+> **簡單比喻：** Gate 就像田徑場每 10 公尺畫一條計時線。車輛通過兩條線的時間差可換算平均速度；`.4` Gate 像在 10 公尺中再插入一條 4 公尺的中途計時線。距離標錯時，所有時速會跟著等比例偏差。
+
+#### 2. 將斜拍畫面攤平成道路座標
+
+畫面遠處的 10 公尺看起來比近處短，不能直接用「像素／秒」當速度。`python/gate_speed.py` 把每兩條 Gate 的四個端點視為一個道路四邊形，利用透視轉換矩陣 $H$ 映到局部道路座標：橫向位置 $a=0$ 代表左端、$a=1$ 代表右端，縱向 $s$ 是 Gate 的公尺里程。
+
+$$
+\begin{bmatrix}\tilde a\\\tilde s\\\tilde w\end{bmatrix}
+=H\begin{bmatrix}x\\y\\1\end{bmatrix},\qquad
+a=\frac{\tilde a}{\tilde w},\quad
+s=\frac{\tilde s}{\tilde w}
+$$
+
+車輛接地點 $(x,y)$ 經轉換後得到「位於第幾公尺」及「在道路左、右之間的比例」。相鄰 Gate 各自有局部矩陣；程式在共同 Gate 前後 25% 範圍混合兩段結果，降低跨段時斜率突然改變造成的速度跳動。短段道路在此被近似為平面，坡度與高程並未重建。
+
+> **簡單比喻：** 斜著拍方格紙時，後方格子會縮小；透視轉換像把照片中的方格紙重新拉平。拉平後才可比較車子在不同位置走過多少公尺。
+
+#### 3. 黃字瞬時速度
+
+每個追蹤 ID 會保留最近約 0.5～1 秒的 $(t_i,s_i)$，遠處像素較敏感時使用較長視窗，近處縮短視窗以降低加減速延遲；低 FPS 時最多延長到 3.1 秒，以盡量保留四個有效位置。程式用線性回歸求里程對時間的斜率：
+
+$$
+\hat v=\frac{\sum_i(t_i-\bar t)(s_i-\bar s)}{\sum_i(t_i-\bar t)^2},\qquad
+v_{km/h}=|\hat v|\times r_{lane}\times3.6
+$$
+
+$r_{lane}$ 是彎道車道差修正比例。多幀回歸可分散單一偵測框晃動的影響；四點以上時再排除偏離回歸趨勢的點。程式把接地點向四個方向各移動 2 像素，估計該位置的公尺不確定度，並與軌跡殘差取較大值。有效位移尚無法超過這個誤差時暫顯示 0 km/h；結果再依不確定度平滑並限制單幀變化。非有限值或高於 250 km/h 的新結果不採用。
+
+早期讀數以黃色顯示 `(estimate)`；累積至少四個有效位置、時間跨越 0.12 秒且位移可分辨後才移除標記。0 km/h 至少觀察 0.4 秒。這種穩定處理會增加一些延遲。
+
+> **簡單比喻：** 只看兩張照片，就像按碼錶時手抖一下便可能差很多；系統會連看數張照片，畫出最符合整段軌跡的直線，再把明顯跳掉的一點忽略。
+
+#### 4. 彎道的 Lane Differential
+
+有左右道路邊界時，每個 Gate 區段在兩側各取 25 個路徑點，再依車輛的橫向比例插值出它所在車道的曲線。該曲線長度與道路中央曲線長度之比就是 $r_{lane}$。內彎路徑較短、外彎較長，因此同樣通過兩條 Gate，實際行進距離會略有不同。修正比例只接受 0.75～1.25；超出範圍通常表示邊界或透視映射失真，程式會退回 Gate 基準距離。沒有道路邊界時也直接使用 Gate 距離。
+
+> **簡單比喻：** 田徑場同一個彎道中，外側跑者需要跑得更遠。道路邊界提供類似跑道內、外圈的形狀，讓程式修正這段距離。
+
+#### 5. 紅字區段速度與時間來源
+
+車輛軌跡跨越 Gate 有限線段時，程式在前後兩幀之間插值交點比例 $\lambda$，取得比整數影格更細的穿越時間：
+
+$$
+t_{cross}=t_0+\lambda(t_1-t_0),\qquad
+v_{section}=\frac{d_{gate}\times r_{lane}}{t_{cross,2}-t_{cross,1}}\times3.6
+$$
+
+只有相鄰 Gate、同一車道、穿越間隔至少 0.05 秒且結果不超過 250 km/h 的區段會被接受。每完成一段，程式累積距離與時間，紅字 `SECTION` 使用「累積總距離 ÷ 首尾總時間」，因此比只看一小段穩定。一般 Gate 的區段是 10 公尺，`.4` Gate 將其拆成 4 與 6 公尺。
+
+影片優先讀取單調遞增的 `CAP_PROP_POS_MSEC` 來源時間；來源時間缺失或倒退時改用影格序號除以 FPS。即時攝影機使用單調時鐘。ByteTrack 暫時沒有 ID 的車框會取得 `TEMP` 身分；與正式 ID 在相鄰影格充分匹配時轉移測速狀態，匹配不明確時重新累積。
+
+停止線與最後一個 Gate 的兩條延伸線形成顯示區間，兩個行車方向共用同一套幾何判定：進入前不顯示速度，區間內顯示黃色瞬時速度，從任一端離開後只顯示紅字區段速度；沒有完成一對 Gate 時顯示 `SECTION -- km/h`。追蹤中斷會重設區間狀態。
+
+#### 6. 精度邊界
+
+`GET /api/status` 的 `speed_scale` 回報 `gate_spacing_m: 10` 與 `quality: ASSUMED`，表示 10 公尺是操作員設定的假設值。若真實 Gate 間距為 8 公尺但系統採 10 公尺，結果約會放大為 $10/8=1.25$ 倍。單一固定鏡頭也無法自行恢復真實坡度、鏡頭內參或完整三維道路。
+
+遠處 Gate 在畫面中的間隔較小，1～2 像素誤差可能代表較大的公尺位移；遮擋、鏡頭晃動、低 FPS、追蹤 ID 錯置、Gate 點選誤差及影片時間戳異常也會影響結果。`python/visual_scale.py` 的多車三維尺寸先驗仍是未接入主流程的實驗模組。現有速度尚未用真實車速校驗，不供執法。
 
 ## 模型與資料來源
 
-團隊自行訓練 Stage-5 道路標線 checkpoint，並提供下列資料與方法來源。這些連結的用途不同：SegFormer 是模型架構與參考實作，不能當作一份獨立的標註資料集。資料集的實際合併比例、標籤映射與訓練配置仍需由團隊補上，才能完整重現訓練。
+### YOLO 車輛模型訓練紀錄
+
+`models/my_model.pt` 的訓練輸出顯示以預訓練 `yolo11x.pt` 進行偵測微調，共 60 epochs、輸入 640 px、batch 16、seed 0，開啟 deterministic 與 AMP，optimizer 採 Ultralytics `auto`。紀錄的總訓練時間為 6800.72 秒，約 1 小時 53 分 21 秒。完整參數與逐 epoch 數值保存在 [training args](result/yolo/args.yaml) 及 [training metrics CSV](result/yolo/results.csv)。原始設定中的 `/content/data.yaml` 是當時 Colab 路徑，專案目前沒有該資料切分檔，因此還不能只靠本倉庫完整重現訓練。
+
+| 指標 | 此次紀錄的最高值 | Epoch | Epoch 60 結果 |
+| --- | ---: | ---: | ---: |
+| Precision | 0.7676 | 60 | 0.7676 |
+| Recall | 0.5836 | 54 | 0.5451 |
+| mAP@0.5 | 0.6009 | 54 | 0.5861 |
+| mAP@0.5:0.95 | 0.2935 | 60 | 0.2935 |
+
+訓練標籤圖共記錄 5319 個物件實例。類別分布明顯不平均，car 約為 scooter 的 5.3 倍；這會讓整體指標更受 car 影響。`None` 是資料中實際存在的 class 0 名稱，不是混淆矩陣的 background；其語意不明且 AP@0.5 很低，主程式不使用這個類別。以下 AP@0.5 取自此次輸出的 PR 曲線。
+
+| 自訂模型類別 | 實例數 | AP@0.5 | 主程式用途 |
+| --- | ---: | ---: | --- |
+| `None`（class 0） | 74 | 0.008 | 不使用；後續資料整理應確認此標籤。 |
+| `bike`（class 1） | 260 | 0.646 | 不使用。 |
+| `car`（class 2） | 3286 | 0.911 | 離鏡頭模式的汽車。 |
+| `pedestrian`（class 3） | 610 | 0.577 | 不使用；行人由預設 YOLO 提供。 |
+| `scooter`（class 4） | 623 | 0.706 | 入、離鏡頭模式的機車。 |
+| `trafficLight`（class 5） | 466 | 0.670 | 不使用；號誌由預設 YOLO 提供。 |
+
+![YOLO 訓練資料的類別與框分布](result/yolo/labels.jpg)
+
+訓練與驗證 loss 整體下降，mAP 在後段逐漸趨緩；最佳 mAP@0.5 出現在 epoch 54，mAP@0.5:0.95 則在 epoch 60 最高。這些數值來自當時驗證集，不能直接代表新道路、夜間、雨天或遮擋場景的準確率。
+
+![YOLO 60 epochs 的 loss 與驗證指標](result/yolo/results.png)
+
+<p align="center">
+  <img src="result/yolo/BoxPR_curve.png" width="49%" alt="YOLO 各類別 Precision-Recall 曲線">
+  <img src="result/yolo/confusion_matrix_normalized.png" width="49%" alt="YOLO 正規化混淆矩陣">
+</p>
+
+正規化混淆矩陣的對角值中，car 為 0.89、scooter 為 0.75；pedestrian 為 0.51，且有 0.41 落到 background。這張圖顯示自訂模型較適合目前程式採用的 car 與 scooter 類別，也顯示其他類別仍有漏檢空間。矩陣比例受驗證資料分布、IoU 與信心門檻影響，不能解讀為道路現場的保證準確率。
+
+![YOLO 驗證批次的預測示例](result/yolo/val_batch0_pred.jpg)
+
+### Stage-5 道路標線訓練資料
+
+`stage5/saved_images/` 提供 iter 100～2500、每 100 iter 一組的訓練快照；每組包含 source 與 supervised target 的輸入、標註及預測，共 150 張。這些圖可用來觀察訓練歷程，但資料夾沒有 loss、mIoU、precision、recall、訓練參數或資料切分紀錄，因此目前只能做定性說明。三張固定路況的 checkpoint 對照標示 Stage-5 best 為 iter 2000；README 使用的四張成果已保存於 `result/lanenet/`，不依賴暫存的 `stage5/` 資料夾。
+
+團隊自行訓練 Stage-5 道路標線 checkpoint，並參考下列資料與方法來源。這些連結用途不同：SegFormer 是模型架構與參考實作，不能當作一份獨立的標註資料集。資料集的實際合併比例、標籤映射與訓練配置仍需補齊，才能完整重現訓練。
 
 | 來源 | 在本專題中的參考角色 |
 | --- | --- |
@@ -181,7 +281,7 @@ YOLO11 偵測 COCO 類別中的汽車、機車、公車、卡車與交通號誌�
 | `POST /save_points` | 驗證並儲存停止線與 Gate。 |
 | `POST /start_processing` | 啟動背景影像分析。 |
 | `GET /video_feed` | 標註畫面的 MJPEG 串流。 |
-| `GET /api/status` | 執行狀態、YOLO／Stage-5 實際裝置、影像尺寸及校正資料。 |
+| `GET /api/status` | 執行狀態、主要偵測模式、YOLO／Stage-5 實際裝置、影像尺寸及校正資料。 |
 | `GET /api/road_markings` | 最新道路標線結果及模型狀態。 |
 | `POST /api/reload_lanenet` | 排程對下一張影格重新載入 Stage-5 並偵測一次。 |
 | `POST /api/reset` | 中止並重置本次分析。 |
@@ -202,9 +302,10 @@ YOLO11 偵測 COCO 類別中的汽車、機車、公車、卡車與交通號誌�
 | `python/video_source.py` | 影像來源與攝影機探測。 |
 | `frontend/main.html` | 目前服務的網頁介面。 |
 | `cord_data/points_data.json` | 操作員校正產生的執行時資料。 |
+| `models/my_model.pt` | Git LFS 管理的 car／scooter YOLO 權重。 |
 | `models/road_marking/` | Stage-5 checkpoint。 |
 | `result/lanenet/` | 精選的 Stage-5 定性視覺與模型對照圖。 |
-| `result/yolo/` | 預留 YOLO 驗證成果目錄。 |
+| `result/yolo/` | 自訂 YOLO 的訓練參數、逐 epoch 指標、資料分布、曲線、混淆矩陣及驗證預測。 |
 | `tests/` | 影像來源、道路標線座標、Reload LaneNet、Gate 校正與測速的單元測試。 |
 
 `frontend/main2.html` 與 `frontend/toweb.py` 是其他／舊版介面及串流輔助程式，目前首頁不使用。`yaml/my_track.yaml` 是追蹤器設定範例，主程式目前指定 Ultralytics 的 `bytetrack.yaml`。
@@ -225,7 +326,7 @@ py -3.12 -m compileall -q python
 py -3.12 -m unittest discover -s tests -v
 ```
 
-現有測試涵蓋道路標線座標、Reload LaneNet 及影像來源輔助函式；團隊也以自行錄製的多種實際路況影片，在 Windows、macOS 的筆電與桌機上進行回測。Stage-5 的四張精選結果圖已放在 `result/lanenet/`，但目前沒有可重現的評估設定或量化指標，因此不能由視覺對照推論偵測準確率。
+現有測試涵蓋道路標線座標、Reload LaneNet 及影像來源輔助函式；團隊也以自行錄製的多種實際路況影片，在 Windows、macOS 的筆電與桌機上進行回測。自訂 YOLO 的訓練曲線、驗證指標與代表性圖片已移到 `result/yolo/`，Stage-5 的四張精選結果圖位於 `result/lanenet/`。YOLO 尚缺原始 `data.yaml` 與可重建的資料切分；Stage-5 尚缺量化指標及完整訓練設定，所以現有圖表不能推論未見場景或道路現場的保證準確率。
 
 完整流程需要模型、影片或攝影機及可用的運算環境。單一號誌選取、追蹤 ID 中斷、遮蔽、鏡頭晃動與透視變化都可能影響結果。現階段沒有現場執法或物理測速驗證，也沒有逐筆事件持久化。
 
