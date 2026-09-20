@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from time import perf_counter
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -52,6 +52,7 @@ class RoadMarkingResult:
     objects: List[Dict[str, Any]]
     inference_ms: float
     model_input_size: Tuple[int, int]
+    _render_cache: tuple | None = field(default=None, init=False, repr=False)
 
     def as_dict(self, frame_index: Optional[int] = None) -> Dict[str, Any]:
         result = {
@@ -244,6 +245,44 @@ def extract_marking_coordinates(
     return output
 
 
+def draw_road_markings(
+    frame: np.ndarray,
+    result: RoadMarkingResult,
+    opacity: float = 0.38,
+    class_ids: Sequence[int] = DEFAULT_CLASS_IDS,
+) -> np.ndarray:
+    """用已快取的分割結果疊圖，不需要保留 Stage-5 模型。"""
+    if frame.shape[:2] != result.class_map.shape:
+        raise ValueError("道路標線遮罩尺寸與影格不一致")
+    cache_key = (tuple(class_ids), frame.shape)
+    if result._render_cache is None or result._render_cache[0] != cache_key:
+        color_mask = np.zeros_like(frame)
+        selected = np.zeros(frame.shape[:2], dtype=bool)
+        for class_id in class_ids:
+            pixels = result.class_map == class_id
+            color_mask[pixels] = ROAD_MARKING_CLASSES[class_id][1]
+            selected |= pixels
+        polylines = []
+        for marking in result.objects:
+            color = ROAD_MARKING_CLASSES[marking["class_id"]][1]
+            for polyline in marking.get("polylines", []):
+                points = np.asarray(
+                    [(point["x"], point["y"]) for point in polyline["points"]],
+                    dtype=np.int32,
+                )
+                if len(points) >= 2:
+                    polylines.append((points, color))
+        result._render_cache = cache_key, color_mask, selected, polylines
+    _, color_mask, selected, polylines = result._render_cache
+    output = frame.copy()
+    blended = cv2.addWeighted(frame, 1.0 - opacity, color_mask, opacity, 0)
+    output[selected] = blended[selected]
+
+    for points, color in polylines:
+        cv2.polylines(output, [points], False, color, 2, cv2.LINE_AA)
+    return output
+
+
 class RoadMarkingDetector:
     """以 Stage-5 SegFormer checkpoint 推論 RLMD 道路標線。"""
 
@@ -349,23 +388,4 @@ class RoadMarkingDetector:
     def draw(
         self, frame: np.ndarray, result: RoadMarkingResult, opacity: float = 0.38
     ) -> np.ndarray:
-        output = frame.copy()
-        color_mask = np.zeros_like(frame)
-        selected = np.zeros(frame.shape[:2], dtype=bool)
-        for class_id in self.class_ids:
-            pixels = result.class_map == class_id
-            color_mask[pixels] = ROAD_MARKING_CLASSES[class_id][1]
-            selected |= pixels
-        blended = cv2.addWeighted(frame, 1.0 - opacity, color_mask, opacity, 0)
-        output[selected] = blended[selected]
-
-        for marking in result.objects:
-            color = ROAD_MARKING_CLASSES[marking["class_id"]][1]
-            for polyline in marking.get("polylines", []):
-                points = np.asarray(
-                    [(point["x"], point["y"]) for point in polyline["points"]],
-                    dtype=np.int32,
-                )
-                if len(points) >= 2:
-                    cv2.polylines(output, [points], False, color, 2, cv2.LINE_AA)
-        return output
+        return draw_road_markings(frame, result, opacity, self.class_ids)
