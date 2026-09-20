@@ -32,7 +32,7 @@ from video_source import CAMERA_BACKENDS, list_available_cameras, open_video_cap
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 # 影像來源預設值：改成 "camera" 使用攝影機，改成 "video" 使用下方影片。
 DEFAULT_INPUT_MODE = "video"
-DEFAULT_VIDEO_NAME = "IMG_6898.MOV"
+DEFAULT_VIDEO_NAME = "newVid1.MOV"
 DEFAULT_CAMERA_INDEX = 1
 DEFAULT_CAMERA_WIDTH = 1280
 DEFAULT_CAMERA_HEIGHT = 720
