@@ -886,7 +886,7 @@
       importButton = document.querySelector('#importGeometry'),
       importFile = document.querySelector('#importFile');
 
-    const MIN_REGULAR_GATES = 5;
+    const MIN_REGULAR_GATES = 3;
     let stopLine = null,
       boundaries = { L: null, R: null },
       boundaryDraft = [],
@@ -1485,7 +1485,7 @@
         }
       }
       if (!Array.isArray(data.gates) || data.gates.length < MIN_REGULAR_GATES) {
-        throw Error('JSON 至少需要五條 Gate');
+        throw Error('JSON 至少需要三條 Gate');
       }
       const importedGates = data.gates.map((gate, index) => {
         if (!/^Gate [1-9]\d*(?:\.4)?$/.test(gate.gate)) throw Error('Gate 名稱格式錯誤');
@@ -1547,7 +1547,7 @@
 
     startButton.onclick = async () => {
       try {
-        if (!readyToStart()) throw Error('請先完成至少五條一般 Gate，並確認每條 Gate 都接到兩側邊界');
+        if (!readyToStart()) throw Error('請先完成至少三條一般 Gate，並確認每條 Gate 都接到兩側邊界');
         await request('/save_points');
         await request('/start_processing');
         processingStarted = true;
