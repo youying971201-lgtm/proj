@@ -2,362 +2,785 @@
 <html lang="zh-Hant">
 <head>
   <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>道路 Gate 校正</title>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+
   <style>
-    * {
-      box-sizing: border-box;
+    /* ============================================================
+       設計變數
+       ============================================================ */
+    :root {
+      --glass-blur: 6px;
+      --glass-opacity: .30;
+      --glass-opacity-strong: .45;
+      --glass-border-opacity: .45;
+      --radius-shell: 32px;
+      --radius-card: 20px;
+      --radius-pill: 999px;
+      --accent: #0a0a0a;
+      --ink: #16171a;
+      --bg-image: none;
     }
+
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; }
+
     body {
-      background: #737373;
-      color: #202124;
-      font: 14px system-ui;
-      margin: 0;
-      min-height: 100vh;
-      padding: 24px;
-    }
-    .app {
-      background: #fff;
-      border-radius: 12px;
-      box-shadow: 0 12px 36px #0004;
-      display: grid;
-      grid-template-columns: minmax(600px, 1fr) 88px;
-      gap: 16px;
-      max-width: 1180px;
-      margin: auto;
-      padding: 20px;
-    }
-    .steps {
+      font-family: 'Inter', -apple-system, 'PingFang TC', 'Microsoft JhengHei', 'Noto Sans TC', system-ui, sans-serif;
+      color: var(--ink);
+      overflow: hidden;
       display: flex;
-      flex-wrap: wrap;
-      gap: 8px;
-      margin-bottom: 16px;
+      padding: 22px;
     }
+
+    /* 隱藏/美化全局滾動條 */
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: rgba(0,0,0,0.15); border-radius: 10px; }
+    ::-webkit-scrollbar-thumb:hover { background: rgba(0,0,0,0.3); }
+
+    /* 背景 */
+    .bg-fallback {
+      position: fixed; inset: 0; z-index: -2;
+      background:
+        radial-gradient(90% 70% at 76% -10%, #ffffff 0%, rgba(255,255,255,0) 55%),
+        radial-gradient(70% 55% at 14% 112%, #ffffff 0%, rgba(255,255,255,0) 62%),
+        linear-gradient(140deg, #e7e7ec 0%, #f4f4f6 40%, #e1e1e6 75%, #ececef 100%);
+    }
+    .bg-image {
+      position: fixed; inset: 0; z-index: -1;
+      background-image: var(--bg-image);
+      background-size: cover;
+      background-position: center;
+    }
+
+    /* 玻璃擬態 */
+    .glass {
+      position: relative;
+      background: rgba(255,255,255, var(--glass-opacity));
+      -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(180%);
+      backdrop-filter: blur(var(--glass-blur)) saturate(180%);
+      border: 1px solid rgba(255,255,255, var(--glass-border-opacity));
+      box-shadow:
+        inset 0 1px 0 rgba(255,255,255,.85),
+        inset 0 -1px 0 rgba(255,255,255,.25),
+        0 24px 60px -30px rgba(0,0,0,.35);
+    }
+    .glass::before {
+      content: '';
+      position: absolute; inset: 0;
+      border-radius: inherit;
+      pointer-events: none;
+      background: linear-gradient(135deg,
+        rgba(255,255,255,.6) 0%, rgba(255,255,255,0) 30%,
+        rgba(255,255,255,0) 70%, rgba(255,255,255,.32) 100%);
+      mix-blend-mode: overlay;
+    }
+    .glass-strong { background: rgba(255,255,255, var(--glass-opacity-strong)); }
+
+    /* ============================================================
+       版面骨架 (頂部列 + 左右分區)
+       ============================================================ */
+    .app {
+      flex: 1;
+      min-width: 0;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      border-radius: var(--radius-shell);
+      padding: 18px;
+    }
+
+    /* 頂部 Header區 */
+    .header {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      flex-shrink: 0;
+    }
+
+    /* 步驟列 */
+    .steps { display: flex; gap: 8px; flex-wrap: nowrap; overflow-x: auto; }
     .step {
-      background: #dedfe1;
-      border-radius: 9px;
-      color: #777;
-      font-weight: 700;
-      padding: 10px 18px;
+      display: flex; align-items: center; justify-content: center; gap: 7px;
+      background: rgba(0,0,0,.05); color: rgba(0,0,0,.42);
+      border-radius: var(--radius-pill);
+      padding: 9px 16px;
+      font-size: 13px; font-weight: 700; white-space: nowrap;
+      transition: background .18s, color .18s;
+      flex: 1;
     }
-    .step.active {
-      background: #777;
-      color: #fff;
-    }
-    .step.done {
-      background: #aeb3b7;
-      color: #fff;
-    }
-    .stage {
-      background: #000;
-      border-radius: 12px;
-      display: grid;
-      min-height: 555px;
-      place-items: center;
+    .step svg { width: 16px; height: 16px; flex-shrink: 0; }
+    .step.active { background: var(--accent); color: #fff; box-shadow: 0 10px 22px -14px rgba(0,0,0,.55); }
+    .step.done { background: rgba(0,0,0,.14); color: rgba(0,0,0,.62); }
+
+    /* 膠囊進度條 */
+    .progress-track {
+      width: 100%;
+      height: 10px;
+      background: rgba(0,0,0,0.06);
+      border-radius: var(--radius-pill);
+      box-shadow: inset 0 1px 3px rgba(0,0,0,0.1);
+      padding: 2px;
       overflow: hidden;
     }
+    .progress-fill {
+      height: 100%;
+      background: var(--accent);
+      border-radius: var(--radius-pill);
+      width: 0%;
+      transition: width 0.4s cubic-bezier(0.2, 0.8, 0.2, 1);
+    }
+
+    /* 左右分區工作區 */
+    .workspace {
+      display: flex;
+      flex: 1;
+      gap: 16px;
+      min-height: 0;
+      min-width: 0;
+    }
+
+    /* ============================================================
+       左側：純淨舞台 (Stage)
+       ============================================================ */
+    .stage {
+      flex: 1;
+      min-height: 0;
+      min-width: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      position: relative;
+      border-radius: var(--radius-card);
+      overflow: hidden;
+    }
+
     .wrap {
       position: relative;
-      max-height: 555px;
+      display: inline-flex;
       max-width: 100%;
+      max-height: 100%;
+      padding: 10px;
+      border-radius: var(--radius-card);
+      background:
+        radial-gradient(120% 90% at 18% 120%, rgba(255,255,255,.08) 0%, rgba(255,255,255,0) 55%),
+        radial-gradient(90% 120% at 82% -20%, rgba(255,255,255,.08) 0%, rgba(255,255,255,0) 60%),
+        linear-gradient(115deg, #141414 0%, #0a0a0a 45%, #181818 70%, #060606 100%);
+      box-shadow: inset 0 0 0 1px rgba(255,255,255,.07), 0 20px 50px -28px rgba(0,0,0,.55);
     }
+
     .wrap img {
       display: block;
-      max-height: 555px;
+      height: 100%;
+      max-height: 100%;
+      width: auto;
       max-width: 100%;
+      object-fit: contain;
+      border-radius: 6px;
+      pointer-events: none;
     }
+
     .wrap canvas {
       cursor: crosshair;
-      inset: 0;
       position: absolute;
-      width: 100%;
-      height: 100%;
+      top: 10px;
+      left: 10px;
+      width: calc(100% - 20px);
+      height: calc(100% - 20px);
       touch-action: none;
+      border-radius: 6px;
     }
-    .bottom {
-      align-items: center;
-      background: #dedede;
-      border-radius: 8px;
+
+    /* ============================================================
+       右側：分類控制面板 (Sidebar)
+       ============================================================ */
+    .sidebar {
+      width: 340px;
       display: flex;
-      flex-wrap: wrap;
-      gap: 12px;
-      margin-top: 12px;
-      padding: 10px 14px;
+      flex-direction: column;
+      gap: 14px;
+      flex-shrink: 0;
+      overflow-y: auto;
+      padding-right: 4px;
     }
-    .status {
-      color: #555;
-      flex: 1;
-      font-weight: 600;
-    }
-    .device-status,
-    .scale-status,
-    .lane-change-status {
-      color: #555;
-      font-size: 12px;
-      font-weight: 700;
-      white-space: nowrap;
-    }
-    .lane-default {
-      align-items: center;
-      display: flex;
-      font-weight: 700;
-      gap: 8px;
-      white-space: nowrap;
-    }
-    .detection-mode {
-      align-items: center;
-      display: flex;
-      font-weight: 700;
-      gap: 8px;
-      white-space: nowrap;
-    }
-    .mode-switch {
-      display: inline-flex;
-      position: relative;
-    }
-    .mode-switch input {
-      height: 1px;
-      opacity: 0;
-      position: absolute;
-      width: 1px;
-    }
-    .mode-slider {
-      background: #777;
-      border-radius: 14px;
-      cursor: pointer;
-      height: 24px;
-      position: relative;
-      transition: background .2s;
-      width: 44px;
-    }
-    .mode-slider::before {
-      background: #fff;
-      border-radius: 50%;
-      content: '';
-      height: 18px;
-      left: 3px;
-      position: absolute;
-      top: 3px;
-      transition: transform .2s;
-      width: 18px;
-    }
-    .mode-switch input:checked + .mode-slider {
-      background: #2987d8;
-    }
-    .mode-switch input:checked + .mode-slider::before {
-      transform: translateX(20px);
-    }
-    .mode-switch input:focus-visible + .mode-slider {
-      outline: 2px solid #202124;
-      outline-offset: 2px;
-    }
-    .lane-default input,
-    .gate-row input {
-      border: 1px solid #aaa;
-      border-radius: 4px;
-      font: inherit;
-      padding: 6px;
-      width: 56px;
-    }
-    .start {
-      background: #666;
-      border: 0;
-      border-radius: 5px;
-      color: #fff;
-      cursor: pointer;
-      font-weight: 800;
-      padding: 10px 18px;
-    }
-    .start:disabled {
-      background: #aaa;
-      cursor: not-allowed;
-    }
-    .secondary {
-      background: #52657a;
-    }
-    .gate-panel {
-      background: #f0f0f0;
-      border-radius: 8px;
-      margin-top: 10px;
-      padding: 10px 14px;
-    }
-    .gate-panel h3 {
-      font-size: 13px;
-      margin: 0 0 7px;
-    }
-    .gate-list {
-      display: flex;
-      gap: 8px;
-      max-height: 82px;
-      overflow-x: auto;
-      padding-bottom: 4px;
-    }
-    .gate-row {
-      align-items: center;
-      background: #fff;
-      border: 1px solid #ddd;
-      border-radius: 5px;
-      display: flex;
-      gap: 6px;
-      padding: 7px;
-      white-space: nowrap;
-      cursor: pointer;
-    }
-    .gate-row span {
-      font-weight: 700;
-    }
-    .tools {
-      align-items: center;
-      background: #8e8e8e;
-      border-radius: 14px;
+
+    .control-panel {
       display: flex;
       flex-direction: column;
       gap: 10px;
-      padding: 12px 8px;
+      padding: 16px;
+      border-radius: var(--radius-card);
     }
+
+    .control-panel h3 {
+      display: flex; align-items: center; gap: 6px;
+      font-size: 11.5px; font-weight: 800; letter-spacing: .04em; text-transform: uppercase;
+      color: rgba(0,0,0,.6); margin: 0 0 4px;
+    }
+    .control-panel h3 svg { width: 15px; height: 15px; }
+
+    /* 狀態區文字 */
+    .status { font-size: 13px; font-weight: 700; color: var(--accent); line-height: 1.4; margin-bottom: 4px; }
+    .device-status, .scale-status, .lane-change-status {
+      font-size: 11px; font-weight: 700; color: rgba(0,0,0,.55);
+      background: rgba(0,0,0,.06); padding: 5px 10px; border-radius: var(--radius-pill);
+      white-space: nowrap; width: fit-content;
+    }
+
+    /* 輸入框設定群組 */
+    .setting-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+    .lane-default, .detection-mode {
+      display: flex; align-items: center; justify-content: space-between; flex: 1;
+      font-size: 12.5px; font-weight: 700; white-space: nowrap;
+      background: rgba(0,0,0,.045); padding: 6px 12px; border-radius: var(--radius-pill);
+    }
+    .lane-default input {
+      border: 1px solid rgba(0,0,0,.16); background: #fff; border-radius: 8px;
+      font: inherit; padding: 4px; width: 42px; text-align: center;
+    }
+
+    /* Switch 切換鈕 */
+    .mode-switch { display: inline-flex; position: relative; }
+    .mode-switch input { height: 1px; opacity: 0; position: absolute; width: 1px; }
+    .mode-slider {
+      background: rgba(0,0,0,.25); border-radius: 14px; cursor: pointer;
+      height: 24px; position: relative; transition: background .2s; width: 44px;
+    }
+    .mode-slider::before {
+      background: #fff; border-radius: 50%; content: '';
+      height: 18px; left: 3px; position: absolute; top: 3px;
+      transition: transform .2s; width: 18px; box-shadow: 0 1px 3px rgba(0,0,0,.25);
+    }
+    .mode-switch input:checked + .mode-slider { background: var(--accent); }
+    .mode-switch input:checked + .mode-slider::before { transform: translateX(20px); }
+    .mode-switch input:focus-visible + .mode-slider { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+    /* 按鈕系統 */
+    .btn-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .btn-full { grid-column: 1 / -1; }
+
+    .btn {
+      display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+      border: 0; border-radius: var(--radius-pill);
+      font-weight: 700; font-size: 13.5px; padding: 10px 16px;
+      cursor: pointer; white-space: nowrap;
+      font-family: inherit;
+    }
+    .btn:disabled { opacity: .35; cursor: not-allowed; }
+
+    /* Gate 列表 (垂直排列) */
+    .gate-panel { flex: 1; display: flex; flex-direction: column; min-height: 180px; }
+    .gate-list {
+      display: flex; flex-direction: column; gap: 8px;
+      flex: 1; overflow-y: auto; padding-right: 4px;
+    }
+    .gate-row {
+      display: flex; align-items: center; gap: 10px;
+      background: rgba(255,255,255,.72); border: 1px solid rgba(0,0,0,.08);
+      border-radius: 12px; padding: 10px 14px;
+      cursor: pointer; font-size: 13px; font-weight: 700;
+      color: var(--ink); transition: background .15s, color .15s, border-color .15s;
+    }
+    .gate-row:hover { background: #fff; }
+    .gate-row.selected { background: var(--accent); color: #fff; border-color: var(--accent); }
+    .gate-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+    .gate-empty { font-size: 13px; color: rgba(0,0,0,.4); text-align: center; padding: 20px 0; }
+
+    /* ============================================================
+       受 Stage 限制的浮動工具列
+       ============================================================ */
+    .tools-palette {
+      position: absolute;
+      top: 50%; right: 16px; transform: translateY(-50%);
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      gap: 10px; padding: 16px 8px; border-radius: 32px; z-index: 100;
+      cursor: grab; touch-action: none; user-select: none;
+      transition: top 0.3s cubic-bezier(0.2, 0.8, 0.2, 1), left 0.3s cubic-bezier(0.2, 0.8, 0.2, 1), box-shadow 0.2s;
+    }
+
+    .tools-palette.dragging {
+      transition: none; cursor: grabbing;
+      box-shadow: 0 30px 60px -20px rgba(0,0,0,0.5); transform: scale(1.02);
+    }
+
+    .palette-handle {
+      width: 32px; height: 12px; display: flex; align-items: center; justify-content: center;
+      cursor: inherit; margin-top: -6px; margin-bottom: 2px; opacity: 0.5;
+    }
+    .palette-handle::after {
+      content: ''; width: 20px; height: 4px; background: rgba(0,0,0,0.4); border-radius: 4px;
+    }
+
+    .tools-container {
+      display: flex; flex-direction: column; gap: 10px; align-items: center;
+      transition: max-height 0.3s ease, opacity 0.3s ease, margin 0.3s ease;
+      overflow: hidden; max-height: 400px; opacity: 1;
+    }
+
+    .tools-palette.collapsed .tools-container {
+      max-height: 0; opacity: 0; margin: 0; pointer-events: none;
+    }
+
     .tool {
-      align-items: center;
-      background: #dedede;
-      border: 0;
+      display: flex; align-items: center; justify-content: center;
+      width: 44px; height: 44px; border-radius: 50%; border: 0;
+      background: rgba(0,0,0,.06); color: rgba(0,0,0,.55); cursor: pointer;
+      transition: background .15s, color .15s;
+    }
+    .tool:active { cursor: pointer; }
+    .tool svg { width: 19px; height: 19px; pointer-events: none; }
+    .tool.active { background: var(--accent); color: #fff; }
+    .tool:disabled { cursor: not-allowed; opacity: .35; }
+    .divider { background: rgba(0,0,0,.12); height: 1px; margin: 2px 0; width: 26px; }
+    .swatch { border: 3px solid #fff; box-shadow: 0 0 0 1px rgba(0,0,0,.25); height: 26px; width: 26px; }
+
+    @media (max-width: 900px) {
+      .workspace { flex-direction: column; }
+      .sidebar { width: 100%; flex: none; }
+      .gate-panel { min-height: 250px; }
+    }
+
+    /* ============================================================
+       動畫載入類別 (SaaS Entrance)
+       ============================================================ */
+    @keyframes fadeInUpSaaS {
+      0% { opacity: 0; transform: translateY(30px) scale(0.98); }
+      100% { opacity: 1; transform: translateY(0) scale(1); }
+    }
+    @keyframes staggerFadeInUp {
+      0% { opacity: 0; transform: translateY(16px); }
+      100% { opacity: 1; transform: translateY(0); }
+    }
+    .animate-fade-in-up { animation: fadeInUpSaaS 0.8s cubic-bezier(0.16, 1, 0.3, 1) both; }
+    .stagger-item { animation: staggerFadeInUp 0.8s cubic-bezier(0.16, 1, 0.3, 1) both; }
+    .delay-100 { animation-delay: 100ms; }
+    .delay-200 { animation-delay: 200ms; }
+    .delay-300 { animation-delay: 300ms; }
+    .delay-400 { animation-delay: 400ms; }
+    .delay-500 { animation-delay: 500ms; }
+    .transition-all { transition-property: all !important; }
+    .duration-300 { transition-duration: 300ms !important; }
+
+    .hover-glow-tool:hover:not(:disabled) {
+      transform: translateY(-2px) scale(1.08);
+      box-shadow: 0 8px 20px rgba(0,0,0,0.12), 0 2px 8px rgba(0,0,0,0.05) !important;
+      background: rgba(0,0,0,0.08) !important;
+    }
+    .hover-glow-tool.active:hover { box-shadow: 0 0 20px rgba(10,10,10,0.3) !important; }
+    .hover-glow-step:hover:not(.active):not(.done) {
+      transform: translateY(-1px); background: rgba(0,0,0,0.08) !important; box-shadow: 0 4px 12px rgba(0,0,0,0.04) !important;
+    }
+    .hover-glow-row:hover {
+      transform: translateX(4px); box-shadow: 0 6px 16px rgba(0,0,0,0.06) !important; background: #fff !important;
+    }
+
+    /* ============================================================
+       極致擬物玻璃設計語言 (Skeuomorphic Glass Language)
+       ============================================================ */
+
+    /* 容器微對比度增強，保留清晰度但避免破壞字體渲染 */
+    .fx-layer-subtle {
+      filter: contrast(1.05) saturate(1.05);
+    }
+
+    /* Primary 行動按鈕專屬：多層玻璃陰影與光澤 */
+    .premium-glass-btn {
+      position: relative;
+      background: rgba(245, 245, 245, 0.4) !important;
+      color: #3e3e3e !important;
+      border: 1px double rgba(51, 51, 51, 0.08) !important;
+      backdrop-filter: blur(4px) contrast(1.1);
+      -webkit-backdrop-filter: blur(4px) contrast(1.1);
+      box-shadow:
+        inset 2px -2px 1px -1px rgba(255, 255, 255, 0.9),
+        inset -2px 2px 1px -1px rgba(255, 255, 255, 0.9),
+        inset 6px -6px 1px -6px rgba(255, 255, 255, 0.55),
+        inset -6px 6px 1px -6px rgba(255, 255, 255, 0.55),
+        inset 0 0 2px rgba(0, 0, 0, 0.8),
+        0 4px 8px rgba(0, 0, 0, 0.15) !important;
+      z-index: 1;
+      transition: all 0.25s ease !important;
+      overflow: visible;
+    }
+
+    /* 內層陰影暈染 */
+    .premium-glass-btn::before {
+      content: "";
+      position: absolute;
+      z-index: -2;
+      top: 35%;
+      left: 50%;
+      transform: translateX(-50%);
+      width: calc(100% - 16px);
+      height: calc(100% - 16px);
+      border-radius: inherit;
+      border: 1px solid rgba(0, 0, 0, 0.9);
+      filter: blur(8px);
+      opacity: 0.4;
+    }
+
+    /* 表面光澤漸層 */
+    .premium-glass-btn::after {
+      content: "";
+      position: absolute;
+      z-index: -1;
+      inset: 0;
+      border-radius: inherit;
+      filter: blur(7px);
+      background: linear-gradient(
+        45deg,
+        rgba(255, 255, 255, 0.8) 0%,
+        transparent 25%,
+        transparent 75%,
+        rgba(255, 255, 255, 0.8) 100%
+      );
+    }
+
+    /* 利用按鈕內的 SVG 重現 .btn-icon 的立體深色圓形按鈕 */
+    .premium-glass-btn svg {
+      background: #3e3e3e !important;
+      stroke: #f5f5f5 !important;
       border-radius: 50%;
-      color: #454545;
-      cursor: pointer;
-      display: flex;
-      font-size: 18px;
-      height: 42px;
-      justify-content: center;
-      width: 42px;
+      padding: 5px;
+      width: 28px !important;
+      height: 28px !important;
+      box-shadow: 0 0 6px rgba(0, 0, 0, 0.3);
+      transition: transform 0.25s ease;
+      margin-right: 4px; /* 增加與文字的微小間距 */
     }
-    .tool.active {
-      background: #333;
-      color: #fff;
+
+    .premium-glass-btn.btn-danger svg { background: #d1453b !important; }
+    .premium-glass-btn.btn-dark svg { background: #1c1c1e !important; }
+
+    /* Hover 與 Active 狀態 */
+    .premium-glass-btn:hover:not(:disabled) {
+      background: rgba(255, 255, 255, 0.2) !important;
+      transform: translateY(-3px) !important;
+      box-shadow:
+        inset 2px -2px 1px -1px rgba(255, 255, 255, 1),
+        inset -2px 2px 1px -1px rgba(255, 255, 255, 1),
+        inset 6px -6px 1px -6px rgba(255, 255, 255, 0.8),
+        inset -6px 6px 1px -6px rgba(255, 255, 255, 0.8),
+        inset 0 0 2px rgba(0, 0, 0, 0.5),
+        0 8px 16px rgba(0, 0, 0, 0.15) !important;
     }
-    .tool:disabled {
-      cursor: not-allowed;
-      opacity: .4;
+    .premium-glass-btn:hover:not(:disabled) svg { transform: scale(1.15); }
+
+    .premium-glass-btn:active:not(:disabled) {
+      transform: scale(0.94) !important;
+      color: #000 !important;
     }
-    .divider {
-      background: #d7d7d7;
-      height: 1px;
-      margin: 2px 0;
-      width: 46px;
+    .premium-glass-btn:active:not(:disabled) svg { transform: scale(0.94); }
+
+    /* Secondary 輔助按鈕專屬：輕量級玻璃設計語言 */
+    .secondary-glass-btn {
+      position: relative;
+      background: rgba(255, 255, 255, 0.3) !important;
+      border: 1px double rgba(51, 51, 51, 0.06) !important;
+      box-shadow:
+        inset 1px -1px 1px -1px rgba(255, 255, 255, 0.8),
+        inset -1px 1px 1px -1px rgba(255, 255, 255, 0.8),
+        0 4px 6px rgba(0, 0, 0, 0.05) !important;
+      backdrop-filter: blur(2px);
+      z-index: 1;
+      transition: all 0.25s ease !important;
     }
-    .swatch {
-      border: 3px solid #fff;
-      box-shadow: 0 0 0 1px #555;
-      height: 24px;
-      width: 24px;
+
+    .secondary-glass-btn svg {
+      transition: transform 0.25s;
     }
-    .tip {
-      color: #777;
-      font-size: 12px;
-      margin: 12px 0 0;
-      text-align: center;
+
+    .secondary-glass-btn:hover:not(:disabled) {
+      background: rgba(255, 255, 255, 0.6) !important;
+      transform: translateY(-2px) !important;
+      box-shadow:
+        inset 2px -2px 2px -1px rgba(255, 255, 255, 1),
+        inset -2px 2px 2px -1px rgba(255, 255, 255, 1),
+        0 6px 12px rgba(0, 0, 0, 0.08) !important;
     }
-    @media (max-width: 760px) {
-      body {
-        padding: 0;
-      }
-      .app {
-        border-radius: 0;
-        grid-template-columns: 1fr 66px;
-        padding: 10px;
-      }
-      .step {
-        font-size: 11px;
-        padding: 8px;
-      }
-      .stage {
-        min-height: 400px;
-      }
-      .bottom {
-        align-items: stretch;
-        flex-direction: column;
-      }
-    }
+
+    .secondary-glass-btn:hover:not(:disabled) svg { transform: scale(1.1); }
+    .secondary-glass-btn:active:not(:disabled) { transform: scale(0.96) !important; }
   </style>
 </head>
 <body>
-  <div class="app">
-    <main>
+  <div class="bg-fallback"></div>
+  <div class="bg-image"></div>
+  <script>
+    (function () {
+      var bgUrl = 'https://images.unsplash.com/photo-1518672703296-e3022657f7b9?q=80&w=1738&auto=format&fit=crop&ixlib=rb-4.1.0&ixid=M3wxMjA3fDB8MHxwaG90by1wYWdlfHx8fGVufDB8fHx8fA%3D%3D';
+      var probe = new Image();
+      probe.onload = function () {
+        document.documentElement.style.setProperty('--bg-image', 'url("' + bgUrl + '")');
+      };
+      probe.src = bgUrl;
+    })();
+  </script>
+
+  <div class="app glass animate-fade-in-up">
+    <!-- 頂部列 -->
+    <header class="header stagger-item delay-100">
       <nav class="steps">
-        <span class="step active" id="previewStep">畫面預覽</span>
-        <span class="step" id="stopStep">設定停止線</span>
-        <span class="step" id="boundaryStep">設定道路邊界</span>
-        <span class="step" id="gateStep">設定閘門</span>
-        <span class="step" id="runStep">開始判斷</span>
+        <span class="step active transition-all duration-300 hover-glow-step" id="previewStep">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12Z" stroke-linejoin="round"/><circle cx="12" cy="12" r="3"/></svg>
+          畫面預覽
+        </span>
+        <span class="step transition-all duration-300 hover-glow-step" id="stopStep">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M4 9h16M4 15h16"/></svg>
+          設定停止線
+        </span>
+        <span class="step transition-all duration-300 hover-glow-step" id="boundaryStep">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M8 3 5 21M16 3l3 18M12 6v2m0 4v2m0 4v2"/></svg>
+          設定道路邊界
+        </span>
+        <span class="step transition-all duration-300 hover-glow-step" id="gateStep">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6 21V4"/><path d="M6 5h11l-2.8 3.5L17 12H6"/></svg>
+          設定閘門
+        </span>
+        <span class="step transition-all duration-300 hover-glow-step" id="runStep">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M7 5.5v13l11-6.5-11-6.5Z"/></svg>
+          開始判斷
+        </span>
       </nav>
-      <section class="stage">
+      <div class="progress-track">
+        <div class="progress-fill" id="progressBar"></div>
+      </div>
+    </header>
+
+    <main class="workspace">
+      <!-- 左側工作舞台 -->
+      <section class="stage stagger-item delay-200" id="stageContainer">
         <div class="wrap">
           <img id="stream" alt="影片第一幀">
           <canvas id="canvas" tabindex="0"></canvas>
         </div>
-      </section>
-      <section class="bottom">
-        <span class="status" id="status">正在準備影片第一幀…</span>
-        <span class="device-status" id="deviceStatus" hidden></span>
-        <span class="scale-status" id="visualScaleStatus" hidden></span>
-        <span class="lane-change-status" id="laneChangeStatus" hidden></span>
-        <label class="lane-default">預設車道數 
-          <input id="defaultLane" type="number" min="1" value="1" disabled>
-        </label>
-        <label class="detection-mode" title="scooter 一律使用 my_model.pt；離鏡頭的 car 也使用該模型">
-          主要偵測：<strong id="detectionModeText">離鏡頭</strong>
-          <span class="mode-switch">
-            <input id="detectionModeSwitch" type="checkbox" role="switch" aria-label="切換入鏡頭或離鏡頭主要偵測模式">
-            <span class="mode-slider" aria-hidden="true"></span>
-          </span>
-        </label>
-        <button class="start secondary" id="finishBoundary" disabled>完成此邊界（Enter）</button>
-        <button class="start secondary" id="fractionalGate" disabled>下一條為 .4 Gate</button>
-        <button class="start secondary" id="exportGeometry" disabled>匯出校正 JSON</button>
-        <button class="start secondary" id="importGeometry">匯入校正 JSON</button>
-        <input id="importFile" type="file" accept="application/json,.json" hidden>
-        <button class="start" id="start" disabled>開始判斷</button>
-        <button class="start" id="resetBtn" style="background: #e75050; display: none;">重新判斷</button>
-        <button class="start" id="reloadLaneNet" disabled>Reload LaneNet</button>
-        <button class="start" onclick="closeApplication()" style="background: #454545;">關閉系統</button>
-      </section>
-      <section class="gate-panel">
-        <h3>Gate 預覽（依設定順序）</h3>
-        <div class="gate-list" id="gateList">
-          <span>尚未設定 Gate</span>
-        </div>
-      </section>
-      <p class="tip" id="instruction">點一下設定停止線 L 錨點，移動滑鼠預覽線段，再點一下設定 R。接著逐點標示左右邊界，按 Enter 完成。</p>
-    </main>
-    <aside class="tools">
-      <button class="tool active" id="draw" title="線段繪製">╱</button>
-      <button class="tool" id="undo" title="上一步">↶</button>
-      <button class="tool" id="redo" title="重做">⟳</button>
-      <span class="divider"></span>
-      <button class="tool swatch" id="colour" title="切換 Gate 顏色"></button>
-    </aside>
-  </div>
-  <script>
-    function closeApplication() {
-    // 1. 跳出確認彈窗
-    const userConfirmed = confirm("確定要關閉視窗嗎？這將會同時關閉背景的 Python 伺服器。");
 
-    if (userConfirmed) {
-        // 2. 發送 POST 請求給後端的 /shutdown API
-        fetch('/shutdown', {
-            method: 'POST'
-        })
-        .then(() => {
-            // 3. 請求成功後，關閉目前的 HTML 視窗
-            // 注意：基於瀏覽器安全限制，如果視窗不是由腳本 (window.open) 開啟的，window.close() 可能會失效
-            window.close();
-        })
-        .catch(error => {
-            console.error("關閉伺服器時發生錯誤:", error);
-            alert("背景伺服器已關閉或無回應，請手動關閉此網頁。");
-        });
+        <aside class="tools-palette glass glass-strong animate-fade-in-up delay-300" id="floatingPalette">
+          <div class="palette-handle" id="paletteHandle" title="拖曳移動，雙擊摺疊"></div>
+          <div class="tools-container">
+            <button class="tool active transition-all duration-300 hover-glow-tool" id="draw" title="線段繪製">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"><path d="M4 20l1-4L16.5 4.5a1.5 1.5 0 0 1 2 0l1 1a1.5 1.5 0 0 1 0 2L8 19l-4 1Z"/></svg>
+            </button>
+            <button class="tool transition-all duration-300 hover-glow-tool" id="undo" title="上一步">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M9 14 4 9l5-5"/><path d="M4 9h10a6 6 0 0 1 0 12h-3"/></svg>
+            </button>
+            <button class="tool transition-all duration-300 hover-glow-tool" id="redo" title="重做">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M15 14l5-5-5-5"/><path d="M20 9H10a6 6 0 0 0 0 12h3"/></svg>
+            </button>
+            <span class="divider"></span>
+            <button class="tool swatch transition-all duration-300 hover-glow-tool" id="colour" title="切換 Gate 顏色"></button>
+          </div>
+        </aside>
+      </section>
+
+      <!-- 右側：控制選單 (加上 fx-layer-subtle) -->
+      <aside class="sidebar fx-layer-subtle">
+
+        <!-- 區塊 1 -->
+        <div class="control-panel glass stagger-item delay-300">
+          <h3>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>
+            狀態與設定
+          </h3>
+          <div class="status" id="status">正在準備影片第一幀…</div>
+          <div class="device-status" id="deviceStatus" hidden></div>
+          <div class="scale-status" id="visualScaleStatus" hidden></div>
+          <div class="lane-change-status" id="laneChangeStatus" hidden></div>
+
+          <div class="setting-row" style="margin-top: 4px;">
+            <label class="lane-default">車道數
+              <input id="defaultLane" type="number" min="1" value="1" disabled>
+            </label>
+            <label class="detection-mode" title="切換入鏡頭或離鏡頭主要偵測模式">
+              <strong id="detectionModeText">離鏡頭</strong>
+              <span class="mode-switch">
+                <input id="detectionModeSwitch" type="checkbox" role="switch">
+                <span class="mode-slider"></span>
+              </span>
+            </label>
+          </div>
+        </div>
+
+        <!-- 區塊 2: 按鈕換上 Skeuomorphic Glass Classes -->
+        <div class="control-panel glass stagger-item delay-400">
+          <h3>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>
+            操作指令
+          </h3>
+          <div class="btn-grid">
+            <button class="btn btn-secondary transition-all duration-300 secondary-glass-btn" id="finishBoundary" disabled>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 13l4 4L19 7"/></svg>
+              完成邊界 (Enter)
+            </button>
+            <button class="btn btn-secondary transition-all duration-300 secondary-glass-btn" id="fractionalGate" disabled>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M12 3v6M12 15v6"/></svg>
+              <span class="btn-label">新增 .4 Gate</span>
+            </button>
+            <button class="btn btn-secondary transition-all duration-300 secondary-glass-btn" id="exportGeometry" disabled>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0-4-4m4 4 4-4"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
+              匯出 JSON
+            </button>
+            <button class="btn btn-secondary transition-all duration-300 secondary-glass-btn" id="importGeometry">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 15V3m0 0 4 4m-4-4-4 4"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
+              匯入 JSON
+            </button>
+            <input id="importFile" type="file" accept="application/json,.json" hidden>
+
+            <!-- 主要按鈕使用 premium-glass-btn -->
+            <button class="btn btn-primary btn-full transition-all duration-300 premium-glass-btn" id="start" disabled>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M7 5.5v13l11-6.5-11-6.5Z"/></svg>
+              開始判斷
+            </button>
+            <button class="btn btn-danger btn-full transition-all duration-300 premium-glass-btn" id="resetBtn" style="display: none;">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12a8 8 0 1 1 2.6 5.9"/><path d="M4 21v-5h5"/></svg>
+              重新判斷
+            </button>
+
+            <button class="btn btn-secondary transition-all duration-300 secondary-glass-btn" id="reloadLaneNet" disabled>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11A8 8 0 0 0 6 6.3M4 13a8 8 0 0 0 14 4.7"/><path d="M4 4v5h5M20 20v-5h-5"/></svg>
+              Reload Model
+            </button>
+            <button class="btn btn-dark transition-all duration-300 premium-glass-btn" onclick="closeApplication()">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M12 3v8"/><path d="M7 6a7 7 0 1 0 10 0"/></svg>
+              關閉系統
+            </button>
+          </div>
+        </div>
+
+        <!-- 區塊 3 -->
+        <div class="control-panel glass gate-panel stagger-item delay-500">
+          <h3>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M8 6h12M8 12h12M8 18h12M4 6h.01M4 12h.01M4 18h.01"/></svg>
+            Gate 預覽列表
+          </h3>
+          <div class="gate-list" id="gateList">
+            <div class="gate-empty">尚未設定 Gate</div>
+          </div>
+        </div>
+
+      </aside>
+    </main>
+  </div>
+
+  <script>
+    /* ============================================================
+       浮動工具列邏輯 (嚴格限制在 Stage 內部)
+       ============================================================ */
+    const palette = document.getElementById('floatingPalette');
+    const handle = document.getElementById('paletteHandle');
+    const stageContainer = document.getElementById('stageContainer');
+
+    let isDragging = false;
+    let startX, startY, initialLeft, initialTop;
+
+    handle.addEventListener('dblclick', () => {
+      palette.classList.toggle('collapsed');
+      snapToEdge();
+    });
+
+    palette.addEventListener('pointerdown', (e) => {
+      if (e.target.closest('.tool')) return;
+
+      isDragging = true;
+      palette.classList.add('dragging');
+
+      const stageRect = stageContainer.getBoundingClientRect();
+      const rect = palette.getBoundingClientRect();
+
+      initialLeft = rect.left - stageRect.left;
+      initialTop = rect.top - stageRect.top;
+
+      palette.style.transform = 'none';
+      palette.style.right = 'auto';
+      palette.style.left = initialLeft + 'px';
+      palette.style.top = initialTop + 'px';
+
+      startX = e.clientX;
+      startY = e.clientY;
+
+      document.addEventListener('pointermove', onDragMove);
+      document.addEventListener('pointerup', onDragEnd);
+      e.preventDefault();
+    });
+
+    function onDragMove(e) {
+      if (!isDragging) return;
+
+      const dx = e.clientX - startX;
+      const dy = e.clientY - startY;
+
+      let newLeft = initialLeft + dx;
+      let newTop = initialTop + dy;
+
+      const maxLeft = stageContainer.clientWidth - palette.offsetWidth;
+      const maxTop = stageContainer.clientHeight - palette.offsetHeight;
+
+      newLeft = Math.max(0, Math.min(newLeft, maxLeft));
+      newTop = Math.max(0, Math.min(newTop, maxTop));
+
+      palette.style.left = newLeft + 'px';
+      palette.style.top = newTop + 'px';
     }
-  }
+
+    function onDragEnd() {
+      if (!isDragging) return;
+      isDragging = false;
+      palette.classList.remove('dragging');
+
+      document.removeEventListener('pointermove', onDragMove);
+      document.removeEventListener('pointerup', onDragEnd);
+
+      snapToEdge();
+    }
+
+    function snapToEdge() {
+      const padding = 16;
+      const stageW = stageContainer.clientWidth;
+      const stageH = stageContainer.clientHeight;
+      const paletteW = palette.offsetWidth;
+      const paletteH = palette.offsetHeight;
+
+      const centerX = palette.offsetLeft + paletteW / 2;
+
+      let targetLeft = padding;
+      if (centerX > stageW / 2) {
+        targetLeft = stageW - paletteW - padding;
+      }
+
+      let targetTop = Math.max(padding, Math.min(palette.offsetTop, stageH - paletteH - padding));
+
+      palette.style.left = targetLeft + 'px';
+      palette.style.top = targetTop + 'px';
+    }
+
+    window.addEventListener('resize', () => {
+      if (!isDragging) snapToEdge();
+    });
+
+    /* ============================================================
+       原應用程式邏輯
+       ============================================================ */
+    function closeApplication() {
+      const userConfirmed = confirm("確定要關閉視窗嗎？這將會同時關閉背景的 Python 伺服器。");
+      if (userConfirmed) {
+          fetch('/shutdown', { method: 'POST' })
+          .then(() => window.close())
+          .catch(error => {
+              console.error("關閉伺服器時發生錯誤:", error);
+              alert("背景伺服器已關閉或無回應，請手動關閉此網頁。");
+          });
+      }
+    }
+
     window.addEventListener('beforeunload', function (e) {
-    // 現代瀏覽器為了防範廣告，不允許自訂提示文字，預設就是顯示截圖中的統一文字
-    e.preventDefault();
-    e.returnValue = ''; 
+      e.preventDefault();
+      e.returnValue = '';
     });
 
     const image = document.querySelector('#stream'),
@@ -376,7 +799,8 @@
       defaultLaneInput = document.querySelector('#defaultLane'),
       detectionModeSwitch = document.querySelector('#detectionModeSwitch'),
       detectionModeText = document.querySelector('#detectionModeText'),
-      gateList = document.querySelector('#gateList');
+      gateList = document.querySelector('#gateList'),
+      progressBar = document.querySelector('#progressBar');
 
     const steps = {
       preview: document.querySelector('#previewStep'),
@@ -406,19 +830,15 @@
             ? `${String(devices.stage5).toUpperCase()}（Reload 時）`
             : '停用';
           deviceStatus.textContent = `裝置：YOLO ${yoloDevice}｜Stage-5 ${stage5Device}`;
-          deviceStatus.title = '顯示後端實際選定的推論裝置；Stage-5 只在 Reload LaneNet 時載入';
         }
         const scale = data.speed_scale || data.visual_scale;
         visualScaleStatus.hidden = !processingStarted || !scale;
         if (processingStarted && scale) {
-          visualScaleStatus.title = scale.method === 'gate_distance'
-            ? '以使用者標示的相鄰一般 Gate 距離 10 m 為基準；現地距離尚未量測驗證'
-            : '使用車種尺寸先驗估算，尚未與實測車速比對';
           visualScaleStatus.textContent = scale.method === 'gate_distance'
-            ? '測速基準：相鄰一般 Gate 10 m（現地距離假設）'
+            ? '測速基準：相鄰 Gate 10m（假設）'
             : scale.state === 'ready'
-              ? `畫面測速：${scale.quality === 'MED' ? '中' : '低'}可信（${scale.vehicles} 台車，尺寸先驗）`
-              : `畫面測速：尺度仍用先驗（已取得 ${scale.vehicles} 台車）`;
+              ? `畫面測速：${scale.quality === 'MED' ? '中' : '低'}可信（${scale.vehicles}台車，尺寸先驗）`
+              : `畫面測速：尺度用先驗（${scale.vehicles}台車）`;
         }
         const laneChanges = data.lane_changes;
         laneChangeStatus.hidden = !processingStarted || !laneChanges;
@@ -427,7 +847,7 @@
             ? `變道：${laneChanges.total}（左 ${laneChanges.left}｜右 ${laneChanges.right}）`
             : `變道：${laneChanges.message}`;
           laneChangeStatus.title = laneChanges.enabled
-            ? `已沿左右彎曲邊界等距建立 ${laneChanges.separator_count} 條內部分隔線`
+            ? `已建立 ${laneChanges.separator_count} 條內部分隔線及 ${laneChanges.outer_boundary_count || 0} 條外邊界`
             : '缺少左右道路邊界或 Gate 幾何無效時不進行變道判定';
         }
         reloadButton.disabled = !processingStarted || !roadModelEnabled ||
@@ -464,8 +884,8 @@
       fractionalGateButton = document.querySelector('#fractionalGate'),
       exportButton = document.querySelector('#exportGeometry'),
       importButton = document.querySelector('#importGeometry'),
-      importFile = document.querySelector('#importFile'),
-      instruction = document.querySelector('#instruction');
+      importFile = document.querySelector('#importFile');
+
     const MIN_REGULAR_GATES = 5;
     let stopLine = null,
       boundaries = { L: null, R: null },
@@ -500,6 +920,13 @@
     };
 
     image.src = '/first_frame.jpg?' + Date.now();
+
+    const resizeObserver = new ResizeObserver(() => {
+      if (image.clientWidth > 0 && image.clientHeight > 0) {
+        resize();
+      }
+    });
+    resizeObserver.observe(image);
     addEventListener('resize', resize);
 
     function normal(event) {
@@ -703,17 +1130,21 @@
     }
 
     function progress(active) {
-      const names = ['preview', 'stop', 'boundary', 'gate', 'run'],
-        at = names.indexOf(active);
+      const names = ['preview', 'stop', 'boundary', 'gate', 'run'];
+      const at = names.indexOf(active);
       names.forEach((name, i) => {
-        steps[name].className = `step ${i < at ? 'done' : i === at ? 'active' : ''}`;
+        steps[name].className = `step ${i < at ? 'done' : i === at ? 'active' : ''} transition-all duration-300 hover-glow-step`;
       });
+      // 更新進度條百分比
+      const percentage = (at / (names.length - 1)) * 100;
+      progressBar.style.width = `${percentage}%`;
     }
 
     function refresh() {
       const phase = currentPhase();
       progress(processingStarted ? 'run' : phase === 'stop' ? 'stop' :
         phase === 'gate' && readyToStart() ? 'run' : phase === 'gate' ? 'gate' : 'boundary');
+
       defaultLaneInput.disabled = !stopLine;
       undoButton.disabled = !undoStack.length;
       redoButton.disabled = !redoStack.length;
@@ -721,18 +1152,23 @@
       finishBoundaryButton.disabled = !drawing || !['left', 'right'].includes(phase) || !boundaryDraft.length;
       fractionalGateButton.disabled = !drawing || phase !== 'gate' || !gates.length ||
         gates[gates.length - 1].gate.endsWith('.4');
-      fractionalGateButton.textContent = nextFractional ? '下一條：.4 Gate ✓' : '下一條為 .4 Gate';
+      fractionalGateButton.querySelector('.btn-label').textContent = nextFractional ? '下一條：.4 Gate ✓' : '新增 .4 Gate';
       exportButton.disabled = !readyToStart();
       colourButton.style.background = colours[colourIndex];
       drawButton.classList.toggle('active', drawing);
+
       gateList.innerHTML = gates.length
-        ? gates.map((g, i) => `<button type="button" class="gate-row" data-index="${i}"><span>${g.gate}</span> ${g.line ? `${g.angle_deg.toFixed(1)}°` : '⚠ 邊界未相交'}</button>`).join('')
-        : '<span>尚未設定 Gate</span>';
-      instruction.textContent = phase === 'stop'
-        ? '先點停止線 L 錨點，再點 R 錨點；線段會跟隨滑鼠預覽。停止線須跨越所有要校正的車道。'
-        : phase === 'left' || phase === 'right'
-          ? `從停止線 ${phase === 'left' ? 'L' : 'R'} 端沿道路邊界逐點點擊；線段會跟隨滑鼠，按 Enter 完成此邊界。`
-          : '點選白色虛線頂端建立 Gate；選取 Gate 後拖曳圓形把手調整角度，線段會自動接到左右邊界。至少需要 5 個一般 Gate。';
+        ? gates.map((g, i) => `<div class="gate-row${i === selectedGateIndex ? ' selected' : ''} transition-all duration-300 hover-glow-row" data-index="${i}"><span class="gate-dot" style="background:${g.color}"></span><span>${g.gate}</span><span style="margin-left:auto;">${g.line ? `${g.angle_deg.toFixed(1)}°` : '⚠'}</span></div>`).join('')
+        : '<div class="gate-empty">尚未設定 Gate</div>';
+
+      if (phase === 'stop') {
+        if (!stopAnchor) status.textContent = '請點選停止線 L 錨點。';
+      } else if (phase === 'left' || phase === 'right') {
+         if (!boundaryDraft.length) status.textContent = `請沿道路點選 ${phase === 'left' ? '左' : '右'} 邊界。`;
+      } else if (phase === 'gate') {
+         if (!gates.length) status.textContent = '請點選白色虛線頂端建立 Gate 1。';
+      }
+
       paintAll();
     }
 
@@ -775,8 +1211,8 @@
       selectedGateIndex = gates.length - 1;
       nextFractional = false;
       status.textContent = line
-        ? `✅ ${gates[selectedGateIndex].gate} 已建立。拖曳圓形把手可調整角度。`
-        : '⚠ Gate 尚未與兩側邊界相交；請拖曳圓形把手調整角度或重畫邊界。';
+        ? `✅ ${gates[selectedGateIndex].gate} 已建立。拖曳圓形把手可調整。`
+        : '⚠ Gate 尚未相交；請調整角度或重畫邊界。';
       refresh();
     }
 
@@ -844,14 +1280,14 @@
         if (!stopAnchor) {
           stopAnchor = point;
           hoverPoint = point;
-          status.textContent = '已固定 L 錨點；移動滑鼠預覽，點一下設定 R 錨點。';
+          status.textContent = '已固定 L 錨點；點一下設定 R 錨點。';
         } else if (distanceInSource(stopAnchor, point) < 15) {
           status.textContent = '❌ 停止線太短，請點更遠的 R 錨點。';
         } else {
           recordChange();
           stopLine = { L: stopAnchor, R: point };
           stopAnchor = hoverPoint = null;
-          status.textContent = '✅ 停止線完成；請從 L 端沿道路點選左邊界。';
+          status.textContent = '✅ 停止線完成；請沿道路點選左邊界。';
         }
       } else if (action.kind === 'boundary') {
         const side = currentPhase() === 'left' ? 'L' : 'R';
@@ -859,7 +1295,7 @@
         if (distanceInSource(previous, point) >= 5) {
           recordChange();
           boundaryDraft.push(point);
-          status.textContent = `已加入 ${side} 邊界點；移動滑鼠預覽下一段，按 Enter 完成。`;
+          status.textContent = `已加入 ${side} 邊界點；按 Enter 完成。`;
         }
       } else if (action.kind === 'place') {
         addGate(point);
@@ -870,7 +1306,7 @@
           redoStack = [];
           status.textContent = gates[action.index].line
             ? `✅ ${gates[action.index].gate} 角度已調整。`
-            : '⚠ Gate 尚未與兩側邊界相交，請繼續調整角度。';
+            : '⚠ Gate 尚未與邊界相交。';
         }
       }
       refresh();
@@ -893,7 +1329,7 @@
       if (!['left', 'right'].includes(phase) || !boundaryDraft.length) return;
       const side = phase === 'left' ? 'L' : 'R';
       if (distanceInSource(stopLine[side], boundaryDraft[0]) < 15) {
-        status.textContent = '❌ 邊界太短，請沿道路加入更遠的點。';
+        status.textContent = '❌ 邊界太短，請加入更遠的點。';
         return;
       }
       recordChange();
@@ -901,8 +1337,8 @@
       boundaryDraft = [];
       hoverPoint = null;
       status.textContent = side === 'L'
-        ? '✅ 左邊界完成；請從 R 端沿道路點選右邊界。'
-        : '✅ 兩側邊界完成；請點白色虛線頂端建立 Gate 1。';
+        ? '✅ 左邊界完成；請點選右邊界。'
+        : '✅ 兩側邊界完成；請建立 Gate 1。';
       refresh();
     };
 
@@ -922,15 +1358,14 @@
       if (fractionalGateButton.disabled) return;
       recordChange();
       nextFractional = !nextFractional;
-      status.textContent = nextFractional ? '下一次點擊會新增選配的 .4 Gate。' : '下一次點擊會新增一般 Gate。';
       refresh();
     };
 
     gateList.onclick = e => {
-      const row = e.target.closest('[data-index]');
+      const row = e.target.closest('.gate-row');
       if (!row) return;
       selectedGateIndex = Number(row.dataset.index);
-      status.textContent = `${gates[selectedGateIndex].gate} 已選取；拖曳圓形把手調整角度。`;
+      status.textContent = `${gates[selectedGateIndex].gate} 已選取。`;
       refresh();
     };
 
@@ -1014,7 +1449,7 @@
       link.download = 'gate_geometry.json';
       link.click();
       setTimeout(() => URL.revokeObjectURL(url), 1000);
-      status.textContent = '✅ 已匯出完整校正 JSON；請妥善對應原始影片。';
+      status.textContent = '✅ 已匯出完整校正 JSON。';
     };
 
     function checkPoint(point) {
@@ -1080,7 +1515,7 @@
       defaultLaneInput.value = count;
       detectionModeSwitch.checked = detectionMode === 'entering';
       refreshDetectionModeText();
-      status.textContent = `✅ 已匯入 ${importedGates.length} 條 Gate；請確認畫面與原始影片相符。`;
+      status.textContent = `✅ 已匯入 ${importedGates.length} 條 Gate。`;
       refresh();
     }
 
@@ -1107,8 +1542,9 @@
       if (!response.ok) throw Error(data.detail);
       return data;
     }
+
     const resetBtn = document.querySelector('#resetBtn');
-    
+
     startButton.onclick = async () => {
       try {
         if (!readyToStart()) throw Error('請先完成至少五條一般 Gate，並確認每條 Gate 都接到兩側邊界');
@@ -1119,10 +1555,9 @@
         progress('run');
         status.textContent = '✅ 判斷已開始。';
         await updateReloadAvailability();
-        
-        // 開始後，隱藏開始按鈕，顯示重新判斷按鈕
+
         startButton.style.display = 'none';
-        resetBtn.style.display = 'block';
+        resetBtn.style.display = 'inline-flex';
       } catch (error) {
         status.textContent = '❌ ' + error.message;
       }
@@ -1131,17 +1566,10 @@
     resetBtn.onclick = async () => {
       try {
         status.textContent = '⏳ 正在停止並重置模型，請稍候...';
-        
-        // 1. 呼叫後端重置，中斷目前的影片處理
         await request('/api/reset');
-        
-        // 2. 確保剛才畫的線（包含預覽等）再次被儲存
         await request('/save_points');
-        
-        // 3. 重新觸發開始處理
         await request('/start_processing');
-        
-        // 4. 強制刷新圖片網址以解凍畫面
+
         processingStarted = true;
         image.src = '/video_feed?' + Date.now();
         status.textContent = '✅ 已重新開始判斷。';
