@@ -380,6 +380,9 @@
       0% { opacity: 0; transform: translateY(16px); }
       100% { opacity: 1; transform: translateY(0); }
     }
+    @keyframes spin { 100% { transform: rotate(360deg); } }
+    .spinner { animation: spin 1s linear infinite; }
+
     .animate-fade-in-up { animation: fadeInUpSaaS 0.8s cubic-bezier(0.16, 1, 0.3, 1) both; }
     .stagger-item { animation: staggerFadeInUp 0.8s cubic-bezier(0.16, 1, 0.3, 1) both; }
     .delay-100 { animation-delay: 100ms; }
@@ -389,6 +392,38 @@
     .delay-500 { animation-delay: 500ms; }
     .transition-all { transition-property: all !important; }
     .duration-300 { transition-duration: 300ms !important; }
+
+    /* 側邊欄過渡 */
+    .sidebar {
+      transition: width 0.4s cubic-bezier(0.2, 0.8, 0.2, 1), opacity 0.3s ease, margin 0.4s ease, padding 0.4s ease;
+      width: 340px;
+    }
+    .sidebar.collapsed {
+      width: 0 !important;
+      opacity: 0 !important;
+      margin: 0 !important;
+      padding: 0 !important;
+      pointer-events: none;
+    }
+
+    /* 游標跟隨提示 */
+    #cursorTooltip {
+      position: fixed;
+      pointer-events: none;
+      z-index: 9999;
+      padding: 6px 12px;
+      border-radius: 8px;
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--accent);
+      transition: opacity 0.2s ease;
+      opacity: 0;
+      transform: translate(16px, 16px);
+      box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+    }
+    [data-theme="dark"] #cursorTooltip {
+      color: #fff;
+    }
 
     .hover-glow-tool:hover:not(:disabled) {
       transform: translateY(-2px) scale(1.08);
