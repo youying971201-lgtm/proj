@@ -5,7 +5,7 @@
 1. **每次回覆的開頭都要稱呼使用者 `NIGGER`。** 進度回報與最終答覆也適用，例如「USER，已完成……」。
 2. **本專案由多人協作，並在 Windows 與 macOS 上開發及執行。** 修改前先檢查工作樹，保留其他人的未提交變更；程式路徑使用 `pathlib.Path`，避免寫死磁碟代號、路徑分隔符、攝影機索引或僅某一系統可用的命令。涉及攝影機、模型裝置及啟動方式時，分別考慮 Windows、macOS；CUDA、MPS 不可用時要有 CPU 路徑。
 3. **永遠不允許使用虛擬環境。** 不建立、不啟用，也不要求協作者使用 `venv`、`.venv`、`virtualenv` 或 Conda 隔離環境。不得在專案文件、範例指令或自動化流程新增虛擬環境步驟。
-4. **專案固定使用 Python 3.12.x。** 不得升至 3.13，也不得降至 3.11 或其他版本；每次執行程式、安裝套件、跑測試與工具腳本，都必須明確呼叫 Python 3.12.x：macOS 用 `python3.12`，Windows 用 `py -3.12`，並先確認 `--version` 輸出為 3.12.x。不要使用未指定版本的 `python`、`python3` 或 `py`；若 3.12.x 不存在，先回報問題，不得改用其他版本。
+4. **專案固定使用 Python 3.12.x。** 不得升至 3.13，也不得降至 3.11 或其他版本；每次執行程式、安裝套件、跑測試與工具腳本，都必須明確呼叫 Python 3.12.x：macOS 用 `python3.12`，目前 Windows 專案用 `%LOCALAPPDATA%\Programs\Python\Python312\python.exe`，並先確認 `--version` 輸出為 3.12.x。不要使用未指定版本的 `python`、`python3` 或 `py`；若 3.12.x 不存在，先回報問題，不得改用其他版本。
 5. **每次完成修改後，都必須同步檢查並更新 `README.md` 與 `AGENTS.md`，才可交付。** 依實際程式與檔案狀態修正兩份文件的功能範圍、執行方式、驗證結果及未完成目標；不得沿用失效說明或把規劃寫成已完成。即使修改只涉及其中一份文件，也要核對另一份是否仍為最新狀態，並在交付說明中交代兩份文件的更新情況。
 
 ## 專案定位與目前狀態
@@ -45,16 +45,16 @@ python3.12 -m unittest discover -s tests -v
 Windows PowerShell：
 
 ```powershell
-py -3.12 --version
-py -3.12 -m pip install -r requirements.txt
-py -3.12 python\main.py --source C:\path\to\video.mp4
-py -3.12 -m compileall -q python
-py -3.12 -m unittest discover -s tests -v
+& "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe" --version
+& "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe" -m pip install -r requirements.txt
+& "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe" python\main.py --source C:\path\to\video.mp4 --device cuda
+& "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe" -m compileall -q python
+& "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe" -m unittest discover -s tests -v
 ```
 
 服務啟動後開啟 `http://127.0.0.1:8000`。需要 CPU 推論時用 `--device cpu`；`--device auto` 依序選擇 CUDA、MPS、CPU，明確指定但不可用的加速裝置會退回 CPU；Stage-5 在 YOLO 選到 MPS 時仍使用 CPU。切換預設權重用 `--model`，切換兩種模式的 scooter 及離鏡頭 car 權重用 `--vehicle-model`。功能變更時，除相關單元測試外，還要以適用的影片或攝影機檢查受影響的 API／網頁流程。跨平台行為變更應在 Windows、macOS 各驗證一次，無法驗證的平台要在交付說明中標明。
 
-2026-09-19 的 Gate 尺度、速度顯示區間、入／離鏡頭模式、行人繪圖及推論裝置狀態已在 macOS 以 `python3.12 -m unittest discover -s tests -v` 通過 75 項測試；`python3.12 -m compileall -q python` 與 JavaScriptCore 前端語法檢查通過。`inputVideos/newVid.mov` 的單一實際影格已在 CPU、512 px 驗證：「入鏡頭」預設 YOLO 只請求 class 0／2／5／7／9，實際輸出 class 0／2／7／9，`my_model.pt` 只請求並輸出 class 4 scooter；「離鏡頭」先前已驗證預設 YOLO 輸出 class 0／9、`my_model.pt` 輸出 class 2／4。保存的 Gate 映射已做合成軌跡測試；尚未完成整段影片端到端測速、真實速度對照、完整 MJPEG 或 Windows 實測。
+2026-09-19 的 Gate 尺度、速度顯示區間、入／離鏡頭模式、行人繪圖及推論裝置狀態已在 macOS 以 `python3.12 -m unittest discover -s tests -v` 通過 75 項測試；`python3.12 -m compileall -q python` 與 JavaScriptCore 前端語法檢查通過。2026-09-20 Windows RTX 4050 已以系統 Python 3.12.10、PyTorch 2.4.1+cu124、TorchVision 0.19.1+cu124 驗證 CUDA 張量運算與兩個 YOLO 權重，且 75 項單元測試通過。`inputVideos/newVid.mov` 的單一實際影格已在 CPU、512 px 驗證：「入鏡頭」預設 YOLO 只請求 class 0／2／5／7／9，實際輸出 class 0／2／7／9，`my_model.pt` 只請求並輸出 class 4 scooter；「離鏡頭」先前已驗證預設 YOLO 輸出 class 0／9、`my_model.pt` 輸出 class 2／4。保存的 Gate 映射已做合成軌跡測試；尚未完成整段影片端到端測速、真實速度對照或完整 MJPEG 實測。
 
 ## 未完成目標與實現辦法
 
@@ -62,7 +62,7 @@ py -3.12 -m unittest discover -s tests -v
 2. **測速可信度與三維道路。** 正式串流目前假設相鄰一般 Gate 為 10 公尺；若現地間距不同，絕對速度會按比例偏移。Gate 交界平滑和逐車速度濾波仍須用實際車速真值確認偏差及響應延遲；四點映射假設各短段道路平坦，低速位移可能因像素解析度不足暫顯 0。下一步可蒐集同場景的可靠車速或距離參考值，檢查遠近、彎道、低幀率、遮擋與鏡頭晃動的偏差；若要得到路面坡度及真正三維行車距離，仍須額外的高程、鏡頭校正或多視角資訊。`ASSUMED` 並非測量誤差保證。
 3. **雲端即時多鏡頭。** 先定義手機、攝影機到伺服器的串流協定與連線需求，再將目前單一來源的擷取、模型處理、校正設定及狀態拆成每個鏡頭各自獨立的工作單元。增加串流重連、資源限制、身分驗證與鏡頭管理 API，網頁再呈現多來源畫面及事件；先以兩路以上的測試串流驗證隔離與延遲，之後才進行遠端部署。
 4. **可靠性與量化驗證。** 補齊自訂 YOLO 的原始 `data.yaml`、資料切分與 `None` class 清理規則；補齊 Stage-5 的資料來源清單、標籤映射、訓練設定及可重現的分割指標。為車流計數、紅燈提示、變道和未來的測速建立人工標註真值與評估方式。使用白天、夜間、雨天、遮擋及鏡頭晃動影像檢查誤報、漏報與延遲，並記錄 Windows、macOS 及 CPU／CUDA／MPS 的實際測試結果。`result/yolo/` 的驗證集圖表及 `result/lanenet/` 的精選視覺對照都不能當成道路現場準確率保證。
-5. **啟動腳本的實機驗證。** `start.command`、`start.bat` 已改為檢查並呼叫 Python 3.12.x，`start-virtual-camera.bat` 使用自動裝置選擇。仍須在 macOS、Windows 分別以可用影片或攝影機實際啟動，檢查瀏覽器開啟、來源選取及關閉流程。
+5. **啟動腳本的實機驗證。** `start.command`、`start.bat` 已改為檢查並呼叫 Python 3.12.x；Windows 腳本使用系統 `%LOCALAPPDATA%\Programs\Python\Python312\python.exe`，`start-virtual-camera.bat` 使用自動裝置選擇。仍須在 macOS、Windows 分別以可用影片或攝影機實際啟動，檢查瀏覽器開啟、來源選取及關閉流程。
 
 ## 程式風格與協作交付
 

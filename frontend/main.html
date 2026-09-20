@@ -14,14 +14,14 @@
        設計變數
        ============================================================ */
     :root {
-      --glass-blur: 6px;             
-      --glass-opacity: .30;           
-      --glass-opacity-strong: .45;    
-      --glass-border-opacity: .45;    
+      --glass-blur: 6px;
+      --glass-opacity: .30;
+      --glass-opacity-strong: .45;
+      --glass-border-opacity: .45;
       --radius-shell: 32px;
       --radius-card: 20px;
       --radius-pill: 999px;
-      --accent: #0a0a0a;              
+      --accent: #0a0a0a;
       --ink: #16171a;
       --bg-image: none;
     }
@@ -32,7 +32,7 @@
     body {
       font-family: 'Inter', -apple-system, 'PingFang TC', 'Microsoft JhengHei', 'Noto Sans TC', system-ui, sans-serif;
       color: var(--ink);
-      overflow: hidden; 
+      overflow: hidden;
       display: flex;
       padding: 22px;
     }
@@ -88,7 +88,7 @@
     .app {
       flex: 1;
       min-width: 0;
-      min-height: 0; 
+      min-height: 0;
       display: flex;
       flex-direction: column;
       gap: 16px;
@@ -150,23 +150,23 @@
        左側：純淨舞台 (Stage)
        ============================================================ */
     .stage {
-      flex: 1; 
-      min-height: 0; 
+      flex: 1;
+      min-height: 0;
       min-width: 0;
-      display: flex; 
-      align-items: center;      
-      justify-content: center;  
-      position: relative; 
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      position: relative;
       border-radius: var(--radius-card);
-      overflow: hidden; 
+      overflow: hidden;
     }
-    
-    .wrap { 
-      position: relative; 
-      display: inline-flex;  
-      max-width: 100%; 
-      max-height: 100%; 
-      padding: 10px;       
+
+    .wrap {
+      position: relative;
+      display: inline-flex;
+      max-width: 100%;
+      max-height: 100%;
+      padding: 10px;
       border-radius: var(--radius-card);
       background:
         radial-gradient(120% 90% at 18% 120%, rgba(255,255,255,.08) 0%, rgba(255,255,255,0) 55%),
@@ -174,26 +174,26 @@
         linear-gradient(115deg, #141414 0%, #0a0a0a 45%, #181818 70%, #060606 100%);
       box-shadow: inset 0 0 0 1px rgba(255,255,255,.07), 0 20px 50px -28px rgba(0,0,0,.55);
     }
-    
+
     .wrap img {
       display: block;
-      height: 100%; 
+      height: 100%;
       max-height: 100%;
       width: auto;
       max-width: 100%;
-      object-fit: contain; 
+      object-fit: contain;
       border-radius: 6px;
-      pointer-events: none; 
+      pointer-events: none;
     }
-    
+
     .wrap canvas {
-      cursor: crosshair; 
+      cursor: crosshair;
       position: absolute;
-      top: 10px; 
-      left: 10px; 
-      width: calc(100% - 20px); 
-      height: calc(100% - 20px); 
-      touch-action: none; 
+      top: 10px;
+      left: 10px;
+      width: calc(100% - 20px);
+      height: calc(100% - 20px);
+      touch-action: none;
       border-radius: 6px;
     }
 
@@ -227,7 +227,7 @@
 
     /* 狀態區文字 */
     .status { font-size: 13px; font-weight: 700; color: var(--accent); line-height: 1.4; margin-bottom: 4px; }
-    .device-status, .scale-status {
+    .device-status, .scale-status, .lane-change-status {
       font-size: 11px; font-weight: 700; color: rgba(0,0,0,.55);
       background: rgba(0,0,0,.06); padding: 5px 10px; border-radius: var(--radius-pill);
       white-space: nowrap; width: fit-content;
@@ -276,8 +276,8 @@
 
     /* Gate 列表 (垂直排列) */
     .gate-panel { flex: 1; display: flex; flex-direction: column; min-height: 180px; }
-    .gate-list { 
-      display: flex; flex-direction: column; gap: 8px; 
+    .gate-list {
+      display: flex; flex-direction: column; gap: 8px;
       flex: 1; overflow-y: auto; padding-right: 4px;
     }
     .gate-row {
@@ -299,14 +299,14 @@
       position: absolute;
       top: 50%; right: 16px; transform: translateY(-50%);
       display: flex; flex-direction: column; align-items: center; justify-content: center;
-      gap: 10px; padding: 16px 8px; border-radius: 32px; z-index: 100; 
+      gap: 10px; padding: 16px 8px; border-radius: 32px; z-index: 100;
       cursor: grab; touch-action: none; user-select: none;
       transition: top 0.3s cubic-bezier(0.2, 0.8, 0.2, 1), left 0.3s cubic-bezier(0.2, 0.8, 0.2, 1), box-shadow 0.2s;
     }
-    
+
     .tools-palette.dragging {
       transition: none; cursor: grabbing;
-      box-shadow: 0 30px 60px -20px rgba(0,0,0,0.5); transform: scale(1.02); 
+      box-shadow: 0 30px 60px -20px rgba(0,0,0,0.5); transform: scale(1.02);
     }
 
     .palette-handle {
@@ -377,13 +377,13 @@
       transform: translateY(-1px); background: rgba(0,0,0,0.08) !important; box-shadow: 0 4px 12px rgba(0,0,0,0.04) !important;
     }
     .hover-glow-row:hover {
-      transform: translateX(4px); box-shadow: 0 6px 16px rgba(0,0,0,0.06) !important; background: #fff !important; 
+      transform: translateX(4px); box-shadow: 0 6px 16px rgba(0,0,0,0.06) !important; background: #fff !important;
     }
 
     /* ============================================================
        極致擬物玻璃設計語言 (Skeuomorphic Glass Language)
        ============================================================ */
-    
+
     /* 容器微對比度增強，保留清晰度但避免破壞字體渲染 */
     .fx-layer-subtle {
       filter: contrast(1.05) saturate(1.05);
@@ -471,7 +471,7 @@
         0 8px 16px rgba(0, 0, 0, 0.15) !important;
     }
     .premium-glass-btn:hover:not(:disabled) svg { transform: scale(1.15); }
-    
+
     .premium-glass-btn:active:not(:disabled) {
       transform: scale(0.94) !important;
       color: #000 !important;
@@ -514,7 +514,7 @@
   <div class="bg-image"></div>
   <script>
     (function () {
-      var bgUrl = 'https://images.unsplash.com/photo-1518672703296-e3022657f7b9?q=80&w=1738&auto=format&fit=crop&ixlib=rb-4.1.0&ixid=M3wxMjA3fDB8MHxwaG90by1wYWdlfHx8fGVufDB8fHx8fA%3D%3D'; 
+      var bgUrl = 'https://images.unsplash.com/photo-1518672703296-e3022657f7b9?q=80&w=1738&auto=format&fit=crop&ixlib=rb-4.1.0&ixid=M3wxMjA3fDB8MHxwaG90by1wYWdlfHx8fGVufDB8fHx8fA%3D%3D';
       var probe = new Image();
       probe.onload = function () {
         document.documentElement.style.setProperty('--bg-image', 'url("' + bgUrl + '")');
@@ -560,7 +560,7 @@
           <img id="stream" alt="影片第一幀">
           <canvas id="canvas" tabindex="0"></canvas>
         </div>
-        
+
         <aside class="tools-palette glass glass-strong animate-fade-in-up delay-300" id="floatingPalette">
           <div class="palette-handle" id="paletteHandle" title="拖曳移動，雙擊摺疊"></div>
           <div class="tools-container">
@@ -581,7 +581,7 @@
 
       <!-- 右側：控制選單 (加上 fx-layer-subtle) -->
       <aside class="sidebar fx-layer-subtle">
-        
+
         <!-- 區塊 1 -->
         <div class="control-panel glass stagger-item delay-300">
           <h3>
@@ -591,7 +591,8 @@
           <div class="status" id="status">正在準備影片第一幀…</div>
           <div class="device-status" id="deviceStatus" hidden></div>
           <div class="scale-status" id="visualScaleStatus" hidden></div>
-          
+          <div class="lane-change-status" id="laneChangeStatus" hidden></div>
+
           <div class="setting-row" style="margin-top: 4px;">
             <label class="lane-default">車道數
               <input id="defaultLane" type="number" min="1" value="1" disabled>
@@ -630,7 +631,7 @@
               匯入 JSON
             </button>
             <input id="importFile" type="file" accept="application/json,.json" hidden>
-            
+
             <!-- 主要按鈕使用 premium-glass-btn -->
             <button class="btn btn-primary btn-full transition-all duration-300 premium-glass-btn" id="start" disabled>
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M7 5.5v13l11-6.5-11-6.5Z"/></svg>
@@ -640,7 +641,7 @@
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12a8 8 0 1 1 2.6 5.9"/><path d="M4 21v-5h5"/></svg>
               重新判斷
             </button>
-            
+
             <button class="btn btn-secondary transition-all duration-300 secondary-glass-btn" id="reloadLaneNet" disabled>
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11A8 8 0 0 0 6 6.3M4 13a8 8 0 0 0 14 4.7"/><path d="M4 4v5h5M20 20v-5h-5"/></svg>
               Reload Model
@@ -674,35 +675,35 @@
     const palette = document.getElementById('floatingPalette');
     const handle = document.getElementById('paletteHandle');
     const stageContainer = document.getElementById('stageContainer');
-    
+
     let isDragging = false;
     let startX, startY, initialLeft, initialTop;
-    
+
     handle.addEventListener('dblclick', () => {
       palette.classList.toggle('collapsed');
-      snapToEdge(); 
+      snapToEdge();
     });
 
     palette.addEventListener('pointerdown', (e) => {
       if (e.target.closest('.tool')) return;
-      
+
       isDragging = true;
       palette.classList.add('dragging');
-      
+
       const stageRect = stageContainer.getBoundingClientRect();
       const rect = palette.getBoundingClientRect();
-      
+
       initialLeft = rect.left - stageRect.left;
       initialTop = rect.top - stageRect.top;
-      
+
       palette.style.transform = 'none';
       palette.style.right = 'auto';
       palette.style.left = initialLeft + 'px';
       palette.style.top = initialTop + 'px';
-      
+
       startX = e.clientX;
       startY = e.clientY;
-      
+
       document.addEventListener('pointermove', onDragMove);
       document.addEventListener('pointerup', onDragEnd);
       e.preventDefault();
@@ -710,19 +711,19 @@
 
     function onDragMove(e) {
       if (!isDragging) return;
-      
+
       const dx = e.clientX - startX;
       const dy = e.clientY - startY;
-      
+
       let newLeft = initialLeft + dx;
       let newTop = initialTop + dy;
-      
+
       const maxLeft = stageContainer.clientWidth - palette.offsetWidth;
       const maxTop = stageContainer.clientHeight - palette.offsetHeight;
-      
+
       newLeft = Math.max(0, Math.min(newLeft, maxLeft));
       newTop = Math.max(0, Math.min(newTop, maxTop));
-      
+
       palette.style.left = newLeft + 'px';
       palette.style.top = newTop + 'px';
     }
@@ -731,29 +732,29 @@
       if (!isDragging) return;
       isDragging = false;
       palette.classList.remove('dragging');
-      
+
       document.removeEventListener('pointermove', onDragMove);
       document.removeEventListener('pointerup', onDragEnd);
-      
+
       snapToEdge();
     }
-    
+
     function snapToEdge() {
       const padding = 16;
       const stageW = stageContainer.clientWidth;
       const stageH = stageContainer.clientHeight;
       const paletteW = palette.offsetWidth;
       const paletteH = palette.offsetHeight;
-      
+
       const centerX = palette.offsetLeft + paletteW / 2;
-      
+
       let targetLeft = padding;
       if (centerX > stageW / 2) {
         targetLeft = stageW - paletteW - padding;
       }
-      
+
       let targetTop = Math.max(padding, Math.min(palette.offsetTop, stageH - paletteH - padding));
-      
+
       palette.style.left = targetLeft + 'px';
       palette.style.top = targetTop + 'px';
     }
@@ -761,7 +762,7 @@
     window.addEventListener('resize', () => {
       if (!isDragging) snapToEdge();
     });
-    
+
     /* ============================================================
        原應用程式邏輯
        ============================================================ */
@@ -776,10 +777,10 @@
           });
       }
     }
-    
+
     window.addEventListener('beforeunload', function (e) {
       e.preventDefault();
-      e.returnValue = ''; 
+      e.returnValue = '';
     });
 
     const image = document.querySelector('#stream'),
@@ -788,6 +789,7 @@
       status = document.querySelector('#status'),
       deviceStatus = document.querySelector('#deviceStatus'),
       visualScaleStatus = document.querySelector('#visualScaleStatus'),
+      laneChangeStatus = document.querySelector('#laneChangeStatus'),
       drawButton = document.querySelector('#draw'),
       undoButton = document.querySelector('#undo'),
       redoButton = document.querySelector('#redo'),
@@ -838,11 +840,23 @@
               ? `畫面測速：${scale.quality === 'MED' ? '中' : '低'}可信（${scale.vehicles}台車，尺寸先驗）`
               : `畫面測速：尺度用先驗（${scale.vehicles}台車）`;
         }
+        const laneChanges = data.lane_changes;
+        laneChangeStatus.hidden = !processingStarted || !laneChanges;
+        if (processingStarted && laneChanges) {
+          laneChangeStatus.textContent = laneChanges.enabled
+            ? `變道：${laneChanges.total}（左 ${laneChanges.left}｜右 ${laneChanges.right}）`
+            : `變道：${laneChanges.message}`;
+          laneChangeStatus.title = laneChanges.enabled
+            ? `已建立 ${laneChanges.separator_count} 條內部分隔線及 ${laneChanges.outer_boundary_count || 0} 條外邊界`
+            : '缺少左右道路邊界或 Gate 幾何無效時不進行變道判定';
+        }
         reloadButton.disabled = !processingStarted || !roadModelEnabled ||
           reloadInProgress || data.road_markings.state === 'loading';
       } catch (error) {
         roadModelEnabled = false;
         deviceStatus.hidden = true;
+        laneChangeStatus.hidden = true;
+        console.error(error);
         reloadButton.disabled = true;
       }
     }
@@ -871,7 +885,7 @@
       exportButton = document.querySelector('#exportGeometry'),
       importButton = document.querySelector('#importGeometry'),
       importFile = document.querySelector('#importFile');
-      
+
     const MIN_REGULAR_GATES = 5;
     let stopLine = null,
       boundaries = { L: null, R: null },
@@ -906,7 +920,7 @@
     };
 
     image.src = '/first_frame.jpg?' + Date.now();
-    
+
     const resizeObserver = new ResizeObserver(() => {
       if (image.clientWidth > 0 && image.clientHeight > 0) {
         resize();
@@ -1130,7 +1144,7 @@
       const phase = currentPhase();
       progress(processingStarted ? 'run' : phase === 'stop' ? 'stop' :
         phase === 'gate' && readyToStart() ? 'run' : phase === 'gate' ? 'gate' : 'boundary');
-      
+
       defaultLaneInput.disabled = !stopLine;
       undoButton.disabled = !undoStack.length;
       redoButton.disabled = !redoStack.length;
@@ -1142,11 +1156,11 @@
       exportButton.disabled = !readyToStart();
       colourButton.style.background = colours[colourIndex];
       drawButton.classList.toggle('active', drawing);
-      
+
       gateList.innerHTML = gates.length
         ? gates.map((g, i) => `<div class="gate-row${i === selectedGateIndex ? ' selected' : ''} transition-all duration-300 hover-glow-row" data-index="${i}"><span class="gate-dot" style="background:${g.color}"></span><span>${g.gate}</span><span style="margin-left:auto;">${g.line ? `${g.angle_deg.toFixed(1)}°` : '⚠'}</span></div>`).join('')
         : '<div class="gate-empty">尚未設定 Gate</div>';
-        
+
       if (phase === 'stop') {
         if (!stopAnchor) status.textContent = '請點選停止線 L 錨點。';
       } else if (phase === 'left' || phase === 'right') {
@@ -1154,7 +1168,7 @@
       } else if (phase === 'gate') {
          if (!gates.length) status.textContent = '請點選白色虛線頂端建立 Gate 1。';
       }
-      
+
       paintAll();
     }
 
@@ -1528,9 +1542,9 @@
       if (!response.ok) throw Error(data.detail);
       return data;
     }
-    
+
     const resetBtn = document.querySelector('#resetBtn');
-    
+
     startButton.onclick = async () => {
       try {
         if (!readyToStart()) throw Error('請先完成至少五條一般 Gate，並確認每條 Gate 都接到兩側邊界');
@@ -1541,7 +1555,7 @@
         progress('run');
         status.textContent = '✅ 判斷已開始。';
         await updateReloadAvailability();
-        
+
         startButton.style.display = 'none';
         resetBtn.style.display = 'inline-flex';
       } catch (error) {
@@ -1555,7 +1569,7 @@
         await request('/api/reset');
         await request('/save_points');
         await request('/start_processing');
-        
+
         processingStarted = true;
         image.src = '/video_feed?' + Date.now();
         status.textContent = '✅ 已重新開始判斷。';

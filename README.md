@@ -63,14 +63,16 @@ python3.12 python/main.py --source /path/to/video.mp4
 Windows PowerShell：
 
 ```powershell
-py -3.12 --version
-py -3.12 -m pip install -r requirements.txt
-py -3.12 python\main.py --source C:\path\to\video.mp4
+& "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe" --version
+& "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe" -m pip install -r requirements.txt
+& "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe" python\main.py --source C:\path\to\video.mp4 --device cuda
 ```
+
+目前 Windows 開發機使用 `%LOCALAPPDATA%\Programs\Python\Python312\python.exe` 的系統 Python 3.12。`start.bat` 與 VS Code 啟動設定會直接使用它，不建立或啟用虛擬環境。
 
 啟動後開啟 <http://127.0.0.1:8000>。若要使用預設來源，先將 `DEFAULT_VIDEO_NAME` 指定的影片放進 `inputVideos/`，再省略 `--source`。前端「主要偵測」預設為「離鏡頭」：`yolo11x.pt` 只取 person class 0 與 traffic light class 9，Git LFS 管理的 `models/my_model.pt` 取 class 2 car 與 class 4 scooter。切換為「入鏡頭」後，預設 YOLO 使用 person、car、bus、truck、traffic light，`models/my_model.pt` 只提供 scooter；預設 YOLO 的 motorcycle class 3 不使用。兩種模式的 scooter 都只由 `my_model.pt` 判斷，行人都只畫框，不進入車輛機制。`--model` 可改用 YOLO11n／s／m／l／x 或本機相容權重；`--vehicle-model` 指定兩種模式的 scooter，以及離鏡頭模式的 car 權重。道路標線模型預設讀取團隊自行訓練的 `models/road_marking/stage5_roadmark_best.pth`；缺少該模型時可用 `--no-road-markings`。
 
-常用選項（macOS；Windows 將 `python3.12` 改為 `py -3.12`，並依系統調整路徑）：
+常用選項（macOS；目前 Windows 將 `python3.12` 改為 `& "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe"`，並依系統調整路徑）：
 
 ```bash
 # 指定裝置、預設 YOLO 及 car／scooter 模型
@@ -85,11 +87,11 @@ python3.12 python/main.py --road-marking-max-side 960
 python3.12 python/main.py --no-road-markings
 ```
 
-`--device auto` 依序選擇 CUDA、MPS、CPU；明確指定 CUDA 或 MPS 但當前不可用時會改用 CPU。兩種主要偵測模式每幀都執行預設 YOLO 與團隊車輛 YOLO，因為 scooter 一律由後者判斷；兩個模型使用同一裝置及輸入尺寸：MPS 長邊 640，CUDA／CPU 長邊 512。道路標線模型預設使用長邊 1280；Stage-5 在 YOLO 使用 MPS 時改用 CPU，使用 CUDA 時仍用 CUDA。開始判斷後，網頁狀態列會顯示實際裝置。Windows 攝影機無法讀取時可嘗試 `--camera-backend dshow` 或 `msmf`。其餘選項請在 macOS 執行 `python3.12 python/main.py --help`，或在 Windows 執行 `py -3.12 python\main.py --help`。
+`--device auto` 依序選擇 CUDA、MPS、CPU；明確指定 CUDA 或 MPS 但當前不可用時會改用 CPU。兩種主要偵測模式每幀都執行預設 YOLO 與團隊車輛 YOLO，因為 scooter 一律由後者判斷；兩個模型使用同一裝置及輸入尺寸：MPS 長邊 640，CUDA／CPU 長邊 512。道路標線模型預設使用長邊 1280；Stage-5 在 YOLO 使用 MPS 時改用 CPU，使用 CUDA 時仍用 CUDA。開始判斷後，網頁狀態列會顯示實際裝置。Windows 攝影機無法讀取時可嘗試 `--camera-backend dshow` 或 `msmf`。其餘選項請在 macOS 執行 `python3.12 python/main.py --help`，或在目前 Windows 專案執行 `& "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe" python\main.py --help`。
 
-Gate 尺度、速度顯示區間、偵測模式、行人繪圖與推論裝置狀態已在 macOS 使用 Python 3.12 執行 `python3.12 -m unittest discover -s tests -v`（75 項通過）與 `python3.12 -m compileall -q python`；前端腳本另以 JavaScriptCore 通過語法檢查。`inputVideos/newVid.mov` 的單一實際影格已在 CPU、512 px 下驗證：「入鏡頭」預設 YOLO 只請求 class 0／2／5／7／9，實際輸出 class 0／2／7／9，`my_model.pt` 只請求並輸出 class 4 scooter；「離鏡頭」先前已驗證預設 YOLO 輸出 class 0／9、`my_model.pt` 輸出 class 2／4。尚未完成整段影片的端到端預估速度、真實速度對照、完整 MJPEG 畫面或 Windows 實測。
+Gate 尺度、速度顯示區間、偵測模式、行人繪圖與推論裝置狀態已在 macOS 使用 Python 3.12 執行完整單元測試與 `python3.12 -m compileall -q python`；前端腳本另以 JavaScriptCore 通過語法檢查。`inputVideos/newVid.mov` 的單一實際影格已在 CPU、512 px 下驗證：「入鏡頭」預設 YOLO 只請求 class 0／2／5／7／9，實際輸出 class 0／2／7／9，`my_model.pt` 只請求並輸出 class 4 scooter；「離鏡頭」先前已驗證預設 YOLO 輸出 class 0／9、`my_model.pt` 輸出 class 2／4。尚未完成整段影片的端到端預估速度、真實速度對照、完整 MJPEG 畫面或 Windows 實測。
 
-`start.command` 與 `start.bat` 現在會確認 Python 3.12.x 並直接呼叫該版本，不搜尋其他執行環境；macOS 腳本遇到已占用的埠號會報錯，不會強制結束其他服務。`start-virtual-camera.bat` 使用 `--device auto`，有 CUDA 時會選 CUDA，否則走 CPU。腳本仍需在各自系統以實際影片或攝影機完成啟動驗證；若要使用 Windows 的 OBS Virtual Camera，先啟動它，再執行 `start-virtual-camera.bat` 或明確指定 `py -3.12 python\main.py --camera 1 --camera-width 1280 --camera-height 720 --camera-fps 30 --device auto`。若只想驗證道路標線模型，macOS 可執行 `python3.12 python/road_marking_demo.py /path/to/image.jpg`，產生單張影像的疊圖與 JSON 座標。
+`start.command` 與 `start.bat` 現在會確認 Python 3.12.x 並直接呼叫該版本；Windows 腳本使用 `%LOCALAPPDATA%\Programs\Python\Python312\python.exe`，macOS 腳本遇到已占用的埠號會報錯，不會強制結束其他服務。`start-virtual-camera.bat` 使用 `--device auto`，有 CUDA 時會選 CUDA，否則走 CPU。腳本仍需在各自系統以實際影片或攝影機完成啟動驗證；若要使用 Windows 的 OBS Virtual Camera，先啟動它，再執行 `start-virtual-camera.bat`，或以系統 Python 明確指定 `--camera 1 --device cuda`。若只想驗證道路標線模型，macOS 可執行 `python3.12 python/road_marking_demo.py /path/to/image.jpg`，產生單張影像的疊圖與 JSON 座標。
 
 ## 停止線與 Gate 校正
 
@@ -142,9 +144,11 @@ Gate 尺度、速度顯示區間、偵測模式、行人繪圖與推論裝置狀
 
 開始判斷後按 **Reload LaneNet**，Stage-5 SegFormer 才會載入並對當前影格進行一次逐像素語意分割；模型隨後釋放，偵測結果在後續影格持續疊圖，直到下一次 Reload。未按 Reload 時不執行 Stage-5 推論；重新判斷會等待上一輪工作執行緒完全結束，並沿用本次服務記憶體中的標線，服務重啟則需重新偵測。標線疊圖的類別色彩遮罩與折線像素座標也會隨結果快取，避免每幀重建。合成 1280×720 影像、20 次繪製的本機測試中，每幀約由 7.5 ms 降至 4.6 ms；這不是完整 YOLO 處理速度。目前輸出 RLMD 類別 1～10、16，包括槽化區、斑馬線、停止線、實線、虛線及導流線。程式透過連通元件擷取輪廓、中心、外接框及中心線；線類擬合為折線。虛線的 `components` 保留各小段，`polylines` 則將可能屬於同一車道的小段串接。API 同時提供原圖像素 `x/y` 與正規化座標 `nx/ny`；`lane_id` 是單次結果內的折線序號，不是跨影格追蹤 ID。
 
-### 違規變道構想（尚未實作）
+### 彎曲邊界等距變道偵測
 
-團隊規劃以道路標線分割辨認實線邊界，再將車輛追蹤軌跡與邊界對照，判定是否跨越實線；另一個候選條件是變道時未打方向燈。後續仍須實作車輛與車道的關聯、方向燈的時序辨識，以及跨線前後的判定時間窗。現有程式只提供標線座標和車輛追蹤資料，尚未將兩者結合成變道事件。
+前端使用者只需從停止線端點開始標示最左、最右道路邊界並輸入車道數，不必再把人工邊界延伸到畫面底部。後端沿完整左右道路邊界等弧長取樣至兩條邊界的遠端，並利用停止線附近的邊界方向反向外推到螢幕邊緣；每個道路橫斷面按車道數等距取點，再將相同比例的點連成彎曲內部分隔線。因此分隔線與變道判定範圍會從遠端道路邊界經過所有 Gate、停止線，一直延伸到畫面邊緣。例如三車道會在每一個取樣段的 1/3、2/3 道路寬度建立分隔點，道路寬度改變或道路轉彎時仍會跟隨兩側邊界。處理畫面會以橘色與青色畫出實際參與判定的延伸左右外邊界，黃色畫出內部分隔線；每兩組取樣位置形成一個小四邊形，車輛接地點也以這些逐段四邊形換算橫向位置，確保顯示與判定使用相同幾何。Stage-5 保留作道路標線疊圖，不再參與車道區域或變道判定。
+
+正式 ByteTrack ID 的軌跡跨越等距分隔線並深入新車道 8% 車道寬、連續六個影格後，才確認一次 `LEFT` 或 `RIGHT` 變道；車道 1 越過最左人工邊界或最右車道越過最右人工邊界，也以相同防抖規則各記一次離開道路的變道事件。即使設定為一個車道，程式仍保留左右外邊界跨越偵測，只是不建立內部分隔線。車輛回到道路內只恢復車道狀態，不重複累計。短暫碰線、偵測框抖動及追蹤中斷都不計數。畫面顯示 `L1` 等車道編號，一般候選與已確認事件顯示 `LC-L`／`LC-R` 或 `CHANGED-L`／`CHANGED-R`；跨出外邊界則顯示例如 `CHANGED-L 1>OUT`，持續位於外側時顯示 `OUT-L`／`OUT-R`。網頁狀態列及 `GET /api/status` 的 `lane_changes` 提供左右與總變道數及最近事件，其中 API 事件的 `outside` 會標示是否跨出道路。這是依道路等寬假設得到的車道轉換事件；若現場各車道寬度不同，仍需擴充成可個別調整車道比例。
 
 ### 僅用影片的預估時速
 
@@ -322,9 +326,11 @@ python3.12 -m unittest discover -s tests -v
 Windows PowerShell：
 
 ```powershell
-py -3.12 -m compileall -q python
-py -3.12 -m unittest discover -s tests -v
+& "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe" -m compileall -q python
+& "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe" -m unittest discover -s tests -v
 ```
+
+2026-09-20 已在 Windows RTX 4050 使用系統 Python 3.12.10、PyTorch 2.4.1+cu124 與 TorchVision 0.19.1+cu124 驗證 CUDA 張量運算及兩個 YOLO 權重；加入道路邊界遠端、停止線至螢幕邊緣的彎曲等距變道、外邊界顯示與跨越偵測後，完整 93 項單元測試通過。
 
 現有測試涵蓋道路標線座標、Reload LaneNet 及影像來源輔助函式；團隊也以自行錄製的多種實際路況影片，在 Windows、macOS 的筆電與桌機上進行回測。自訂 YOLO 的訓練曲線、驗證指標與代表性圖片已移到 `result/yolo/`，Stage-5 的四張精選結果圖位於 `result/lanenet/`。YOLO 尚缺原始 `data.yaml` 與可重建的資料切分；Stage-5 尚缺量化指標及完整訓練設定，所以現有圖表不能推論未見場景或道路現場的保證準確率。
 

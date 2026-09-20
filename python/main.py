@@ -3,6 +3,7 @@ import json
 import math
 import os
 import signal
+import traceback
 from pathlib import Path
 from threading import Condition, Lock, Thread
 from time import perf_counter
@@ -24,6 +25,7 @@ from ultralytics import YOLO
 
 from Car import Vehicle
 from gate_speed import GateSpeedEstimator, known_gate_stations, segment_intersection
+from lane_change import LaneChangeDetector, LaneLayout, build_equal_lane_layout
 from road_marking import RoadMarkingDetector, draw_road_markings
 from trafficLight import TrafficLightDetector
 from video_source import CAMERA_BACKENDS, list_available_cameras, open_video_capture
@@ -32,7 +34,7 @@ from video_source import CAMERA_BACKENDS, list_available_cameras, open_video_cap
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 # 影像來源預設值：改成 "camera" 使用攝影機，改成 "video" 使用下方影片。
 DEFAULT_INPUT_MODE = "video"
-DEFAULT_VIDEO_NAME = "newVid1.MOV"
+DEFAULT_VIDEO_NAME = "IMG_6899.MOV"
 DEFAULT_CAMERA_INDEX = 1
 DEFAULT_CAMERA_WIDTH = 1280
 DEFAULT_CAMERA_HEIGHT = 720
@@ -604,6 +606,18 @@ def prepare_configuration_frame(
         app.state.gates = []
         app.state.road_boundaries = None
         app.state.visual_scale_status = None
+        app.state.lane_change_status = {
+            "enabled": False,
+            "ready": False,
+            "source": "boundary_equal",
+            "message": "等待左右道路邊界與車道數",
+            "lane_count": 1,
+            "separator_count": 0,
+            "total": 0,
+            "left": 0,
+            "right": 0,
+            "recent_events": [],
+        }
         app.state.inference_devices = None
     frame_broadcaster.publish(frame)
     set_runtime_status("configuring", "請標示停止線與至少三個 Gate，再按開始判斷")
@@ -845,8 +859,26 @@ def run_monitor(
         stop_line=video_config["line"],
         known_gate_spacing=True,
     )
+    lane_layout = (
+        build_equal_lane_layout(
+            speed_estimator.gates,
+            speed_estimator.pair_paths,
+            speed_estimator.lane_count,
+            boundary_paths=speed_estimator.boundaries,
+            frame_size=(width, height),
+        )
+        if speed_boundaries else
+        LaneLayout(
+            False,
+            speed_estimator.lane_count,
+            message="變道偵測需要最左與最右道路邊界",
+        )
+    )
+    lane_change_detector = LaneChangeDetector(lane_layout)
     with line_lock:
         app.state.visual_scale_status = speed_estimator.metric_calibrator.as_dict()
+        app.state.lane_change_status = lane_change_detector.as_dict()
+    print(f"Lane-change geometry: {lane_layout.message}")
 
     vehicles = {}
     fallback_tracker = FallbackVehicleTracker()
@@ -966,6 +998,18 @@ def run_monitor(
                 latest_road_result,
                 opacity=road_marking_opacity,
             )
+        if lane_layout.ready:
+            for boundary, color in zip(
+                lane_layout.display_boundaries,
+                ((0, 165, 255), (255, 255, 0)),
+            ):
+                points = np.asarray(boundary, dtype=np.int32)
+                if len(points) >= 2:
+                    cv2.polylines(frame, [points], False, color, 3, cv2.LINE_AA)
+            for polyline in lane_layout.display_polylines:
+                points = np.asarray(polyline, dtype=np.int32)
+                if len(points) >= 2:
+                    cv2.polylines(frame, [points], False, (0, 255, 255), 3, cv2.LINE_AA)
 
         for gate in speed_estimator.gates:
             left = tuple(round(value) for value in gate.left)
@@ -1063,6 +1107,7 @@ def run_monitor(
                     last_seen_frame=frame_count,
                 )
             vehicle = vehicles[track_id]
+            lane_observation = None
 
             if has_tracker_id:
                 direction = detect_crossing(vehicle, center, video_config)
@@ -1083,6 +1128,26 @@ def run_monitor(
                         illegal_vehicle_ids.add(track_id)
                         print(f"  -> violation: vehicle {track_id}")
 
+                road_position = speed_estimator.road_position(
+                    center, clamp_lateral=False,
+                )
+                lane_observation = lane_change_detector.update(
+                    track_id,
+                    road_position,
+                    frame_count,
+                    frame_timestamp,
+                    point=center,
+                )
+                if lane_observation.event is not None:
+                    event = lane_observation.event
+                    destination = "OUT" if event.outside else str(event.to_lane)
+                    print(
+                        f"Frame {frame_count}: vehicle {track_id} changed lane "
+                        f"{event.from_lane}->{destination} ({event.direction})"
+                    )
+                    with line_lock:
+                        app.state.lane_change_status = lane_change_detector.as_dict()
+
             vehicle.update_position(
                 center,
                 frame_count,
@@ -1097,8 +1162,13 @@ def run_monitor(
             )
             speed_zone_state = speed_estimator.speed_zone_state(track_id)
             section_estimate = speed_estimator.section_speed(track_id)
+            lane_alert = (
+                lane_observation is not None
+                and lane_observation.state in ("CHANGING", "CHANGED")
+            )
             color = (
                 (0, 0, 255) if vehicle.illegal else
+                (0, 165, 255) if lane_alert else
                 (255, 0, 0) if vehicle.motion_state == "STOPPED" else
                 (0, 255, 0)
             )
@@ -1112,9 +1182,14 @@ def run_monitor(
                 identity = f"ID:{track_id} {label}"
             else:
                 identity = f"TEMP:{-track_id}"
+            lane_label = (
+                f" {lane_observation.overlay_label}"
+                if lane_observation is not None and lane_observation.state != "DISABLED"
+                else ""
+            )
             cv2.putText(
                 frame,
-                f"{identity} {vehicle.motion_state} {vehicle.cross_direction or ''}",
+                f"{identity} {vehicle.motion_state}{lane_label} {vehicle.cross_direction or ''}",
                 (x1, label_y),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1,
             )
@@ -1167,6 +1242,7 @@ def run_monitor(
         for track_id in stale_ids:
             del vehicles[track_id]
             speed_estimator.remove(track_id)
+            lane_change_detector.remove(track_id)
 
         now = perf_counter()
         instant_fps = 1.0 / max(now - previous_time, 1e-9)
@@ -1253,6 +1329,9 @@ def run_monitor(
     print(f"Crossing events: {sum(direction_counts.values())}")
     print(f"IN: {direction_counts['IN']}")
     print(f"OUT: {direction_counts['OUT']}")
+    print(f"Lane changes: {lane_change_detector.left_count + lane_change_detector.right_count}")
+    print(f"Lane changes LEFT: {lane_change_detector.left_count}")
+    print(f"Lane changes RIGHT: {lane_change_detector.right_count}")
     print("=============================")
 
 
@@ -1298,6 +1377,7 @@ def status():
             "road_boundaries": getattr(app.state, "road_boundaries", None),
             "visual_scale": getattr(app.state, "visual_scale_status", None),
             "speed_scale": getattr(app.state, "visual_scale_status", None),
+            "lane_changes": getattr(app.state, "lane_change_status", None),
             "devices": getattr(app.state, "inference_devices", None),
             "detection_mode": getattr(
                 app.state, "detection_mode", DETECTION_MODE_LEAVING
@@ -1419,6 +1499,18 @@ async def save_points(request: Request):
         app.state.gates = normalized_gates
         app.state.road_boundaries = road_boundaries
         app.state.detection_mode = detection_mode
+        app.state.lane_change_status = {
+            "enabled": False,
+            "ready": False,
+            "source": "boundary_equal",
+            "message": "等待以左右道路邊界建立彎曲車道",
+            "lane_count": lane_count if road_boundaries is not None else 1,
+            "separator_count": 0,
+            "total": 0,
+            "left": 0,
+            "right": 0,
+            "recent_events": [],
+        }
 
     POINTS_FILE.parent.mkdir(parents=True, exist_ok=True)
     payload = {
@@ -1471,6 +1563,18 @@ def reset_processing():
         app.state.cancel_requested = False
         app.state.monitor_thread = None
         app.state.visual_scale_status = None
+        app.state.lane_change_status = {
+            "enabled": False,
+            "ready": False,
+            "source": "boundary_equal",
+            "message": "等待重新開始並建立彎曲車道",
+            "lane_count": 1,
+            "separator_count": 0,
+            "total": 0,
+            "left": 0,
+            "right": 0,
+            "recent_events": [],
+        }
         if getattr(app.state, "road_marking_reload_requested", False):
             app.state.road_marking_reload_requested = False
             road_marking_status.update(
@@ -1607,6 +1711,7 @@ def main():
     app.state.road_marking_reload_requested = False
     app.state.road_marking_result = None
     app.state.visual_scale_status = None
+    app.state.lane_change_status = None
     app.state.detection_mode = DETECTION_MODE_LEAVING
     with line_lock:
         road_marking_status.update(
@@ -1643,6 +1748,7 @@ def main():
             )
         except Exception as error:
             message = f"判斷程式意外停止：{type(error).__name__}: {error}"
+            traceback.print_exc()
             print(message)
             set_runtime_status("error", message)
             frame_broadcaster.finish()

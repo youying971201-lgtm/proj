@@ -417,7 +417,9 @@ class GateSpeedEstimator:
         ) / (gate_length * gate_length)
         return station, across
 
-    def road_position(self, point: Point) -> tuple[float, float, int] | None:
+    def road_position(
+        self, point: Point, clamp_lateral: bool = True,
+    ) -> tuple[float, float, int] | None:
         """將影像接地點映到局部道路里程，並保留車道橫向比例。"""
         candidates = []
         x, y = point
@@ -482,7 +484,8 @@ class GateSpeedEstimator:
                     weight = 0.5 * (1 - edge_fraction / blend_band)
                     station = (1 - weight) * station + weight * adjacent[0]
                     across = (1 - weight) * across + weight * adjacent[1]
-        return station, max(0.0, min(across, 1.0)), section.gate_pair_index
+        lateral = max(0.0, min(across, 1.0)) if clamp_lateral else across
+        return station, lateral, section.gate_pair_index
 
     @staticmethod
     def _signed_line_distance(line: tuple[Point, Point], point: Point) -> float | None:

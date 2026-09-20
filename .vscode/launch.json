@@ -5,11 +5,14 @@
             "name": "Main：虛擬攝影機",
             "type": "debugpy",
             "request": "launch",
-            "python": "C:\\vs\\lanenet_taiwan\\.venv\\Scripts\\python.exe",
+            "python": "${env:LOCALAPPDATA}\\Programs\\Python\\Python312\\python.exe",
             "program": "${workspaceFolder}/python/main.py",
             "console": "integratedTerminal",
             "cwd": "${workspaceFolder}",
-            "args": []
+            "env": {
+                "YOLO_CONFIG_DIR": "${workspaceFolder}\\.ultralytics"
+            },
+            "args": ["--device", "cuda"]
         }
     ]
 }
