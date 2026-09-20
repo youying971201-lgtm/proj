@@ -89,7 +89,8 @@
       font-weight: 600;
     }
     .device-status,
-    .scale-status {
+    .scale-status,
+    .lane-change-status {
       color: #555;
       font-size: 12px;
       font-weight: 700;
@@ -295,6 +296,7 @@
         <span class="status" id="status">正在準備影片第一幀…</span>
         <span class="device-status" id="deviceStatus" hidden></span>
         <span class="scale-status" id="visualScaleStatus" hidden></span>
+        <span class="lane-change-status" id="laneChangeStatus" hidden></span>
         <label class="lane-default">預設車道數 
           <input id="defaultLane" type="number" min="1" value="1" disabled>
         </label>
@@ -364,6 +366,7 @@
       status = document.querySelector('#status'),
       deviceStatus = document.querySelector('#deviceStatus'),
       visualScaleStatus = document.querySelector('#visualScaleStatus'),
+      laneChangeStatus = document.querySelector('#laneChangeStatus'),
       drawButton = document.querySelector('#draw'),
       undoButton = document.querySelector('#undo'),
       redoButton = document.querySelector('#redo'),
@@ -417,11 +420,22 @@
               ? `畫面測速：${scale.quality === 'MED' ? '中' : '低'}可信（${scale.vehicles} 台車，尺寸先驗）`
               : `畫面測速：尺度仍用先驗（已取得 ${scale.vehicles} 台車）`;
         }
+        const laneChanges = data.lane_changes;
+        laneChangeStatus.hidden = !processingStarted || !laneChanges;
+        if (processingStarted && laneChanges) {
+          laneChangeStatus.textContent = laneChanges.enabled
+            ? `變道：${laneChanges.total}（左 ${laneChanges.left}｜右 ${laneChanges.right}）`
+            : `變道：${laneChanges.message}`;
+          laneChangeStatus.title = laneChanges.enabled
+            ? `已沿左右彎曲邊界等距建立 ${laneChanges.separator_count} 條內部分隔線`
+            : '缺少左右道路邊界或 Gate 幾何無效時不進行變道判定';
+        }
         reloadButton.disabled = !processingStarted || !roadModelEnabled ||
           reloadInProgress || data.road_markings.state === 'loading';
       } catch (error) {
         roadModelEnabled = false;
         deviceStatus.hidden = true;
+        laneChangeStatus.hidden = true;
         console.error(error);
         reloadButton.disabled = true;
       }
