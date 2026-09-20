@@ -12,7 +12,7 @@
 
 本專案是學校專題比賽作品，現階段以自行錄製的道路影片回測。預想使用者包含一般民眾、社區出入口管理者，以及路口事件的初步篩查人員。目標是讓交通違規偵測與場景設定更容易客製化，未來可與主管機關資料比對；現有輸出僅供輔助判斷，須由人員複核。
 
-- `python/main.py` 提供單一影像來源的 FastAPI／MJPEG 服務。第一幀供操作員選擇「入鏡頭／離鏡頭」主要偵測模式，再設定停止線、道路邊界與 Gate；前端要求至少五條一般 Gate，後端 `/save_points` 仍只要求至少三條。模式寫入版本 3 JSON，舊 JSON 預設為 `leaving`；處理中切換須按重新判斷才套用。`GET /api/status` 回傳 `detection_mode`、YOLO／Stage-5 裝置及其他校正狀態。
+- `python/main.py` 提供單一影像來源的 FastAPI／MJPEG 服務。第一幀供操作員選擇「入鏡頭／離鏡頭」主要偵測模式，再設定停止線、道路邊界與 Gate；前端要求至少三條一般 Gate，後端 `/save_points` 要求至少三條 Gate。模式寫入版本 3 JSON，舊 JSON 預設為 `leaving`；處理中切換須按重新判斷才套用。`GET /api/status` 回傳 `detection_mode`、YOLO／Stage-5 裝置及其他校正狀態。
 - 兩種主要偵測模式的 scooter 都只使用 Git LFS 的 `models/my_model.pt` class 4，因此每幀皆執行預設 YOLO 與團隊車輛模型。「入鏡頭」由預設 YOLO 取 person 0、car 2、bus 5、truck 7、traffic light 9，自訂模型只取 scooter 4；預設 YOLO 的 motorcycle 3 會被過濾。「離鏡頭」由預設 YOLO 只取 person 0、traffic light 9，自訂模型取 car 2、scooter 4；bus／truck 不使用。入鏡頭模式的兩個車輛來源使用不同追蹤 ID 命名空間，重疊時自訂 scooter 框優先；離鏡頭模式保留自訂模型原本的 ByteTrack ID。車輛沿用 ByteTrack、停止線越線、`IN`／`OUT`、`ILLEGAL` 與測速；行人只畫 `PERSON` 框與信心分數，不進入追蹤、測速、計數或違規機制。兩模型使用相同裝置與輸入尺寸；ByteTrack 暫無 ID 的車框仍用短期 `TEMP` 身分，`TEMP` 與正式 ID 可在相鄰影格保守交接。
 - `result/yolo/` 保存自訂 YOLO11x 微調的參數、60 epochs 指標與精選圖片。現有紀錄為 640 px、batch 16；最高 mAP@0.5 為 0.6009（epoch 54），最高 mAP@0.5:0.95 為 0.2935（epoch 60）。訓練標籤含語意不明且 AP 很低的 `None` class 0，主程式不使用；原始設定只記錄 Colab 的 `/content/data.yaml`，倉庫沒有可重建的資料切分，因此不得宣稱完整可重現或把驗證集指標當成現場準確率。
 - `python/road_marking.py` 使用團隊訓練的 Stage-5 SegFormer checkpoint。按下 **Reload LaneNet** 後，服務才對下一張影格推論一次，釋放模型並快取標線結果供後續畫面顯示；類別色彩遮罩與折線像素座標也隨結果快取，避免每幀重建。目前不是逐幀分割。API 為 `POST /api/reload_lanenet`、`GET /api/road_markings`。
